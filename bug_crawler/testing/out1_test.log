@@ -1,0 +1,150 @@
+==2761== Memcheck, a memory error detector
+==2761== Copyright (C) 2002-2012, and GNU GPL'd, by Julian Seward et al.
+==2761== Using Valgrind-3.8.1 and LibVEX; rerun with -h for copyright info
+==2761== Command: ./router/qdrouterd -c 01.conf
+==2761==
+Thu Mar 27 12:33:19 2014 config.parser (INFO) Reading Configuration File: 01.conf
+Thu Mar 27 12:33:19 2014 SERVER (INFO) Container Name: Qpid.Dispatch.Router.01
+Thu Mar 27 12:33:19 2014 ROUTER (INFO) Configured Address: prefix=/closest/ fanout=single bias=closest
+Thu Mar 27 12:33:19 2014 ROUTER (INFO) Configured Address: prefix=/spread/ fanout=single bias=spread
+Thu Mar 27 12:33:19 2014 ROUTER (INFO) Configured Address: prefix=/multicast/ fanout=multiple
+Thu Mar 27 12:33:19 2014 ROUTER (INFO) Configured Address: prefix=/ fanout=multiple
+Thu Mar 27 12:33:19 2014 ROUTER (INFO) Router started in Interior mode, area=0 id=QDR.01
+Thu Mar 27 12:33:19 2014 ROUTER (INFO) In-Process Address Registered: $management
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.allocator
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.connection
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.container
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.container.node_type
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.container.node
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.router
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.router.link
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.router.node
+Thu Mar 27 12:33:19 2014 AGENT (INFO) Manageable Entity Type (object) org.apache.qpid.dispatch.router.address
+Thu Mar 27 12:33:19 2014 ROUTER (INFO) In-Process Address Registered: qdrouter
+Thu Mar 27 12:33:19 2014 ROUTER (INFO) In-Process Address Registered: qdhello
+Thu Mar 27 12:33:19 2014 dispatch.router (INFO) Router Engine Instantiated: area=0 id=QDR.01 max_routers=1024
+Thu Mar 27 12:33:20 2014 dispatch.router (INFO) Config: {'remote_ls_max_age': 60.0, 'hello_max_age': 3.0, 'mobile_addr_max_age': 60.0, 'ra_interval': 30.0, 'hello_interval': 1.0}
+Thu Mar 27 12:33:20 2014 SERVER (INFO) Operational, 4 Threads Running
+Thu Mar 27 12:33:20 2014 SERVER (INFO) Running in DEBUG Mode
+Thu Mar 27 12:33:31 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:32 2014 dispatch.router (DEBUG) Event: new_neighbor: id=QDR.02 link_id=0
+Thu Mar 27 12:33:32 2014 dispatch.router (DEBUG) Event: add_neighbor_router: address=amqp:/_topo/0/QDR.02, router_bit=1, link_bit=0
+Thu Mar 27 12:33:32 2014 dispatch.router (INFO) New neighbor established: QDR.02 on link: 0
+Thu Mar 27 12:33:33 2014 dispatch.router (DEBUG) Event: local_link_state_changed: LS(id=QDR.01 area=0 ls_seq=1 peers=['QDR.02'])
+Thu Mar 27 12:33:33 2014 dispatch.router (INFO) New Link-State Collection:
+Thu Mar 27 12:33:33 2014 dispatch.router (INFO)   QDR.01 => ['QDR.02']
+Thu Mar 27 12:33:33 2014 dispatch.router (DEBUG) Event: ls_collection_changed: {'QDR.01': LS(id=QDR.01 area=0 ls_seq=1 peers=['QDR.02'])}
+Thu Mar 27 12:33:33 2014 dispatch.router (DEBUG) Event: next_hops_changed: {'QDR.02': 'QDR.02'}
+Thu Mar 27 12:33:33 2014 dispatch.router (DEBUG) Event: valid_origins_changed: {'QDR.02': []}
+Thu Mar 27 12:33:33 2014 dispatch.router (DEBUG) RCVD: LSR(id=QDR.02 area=0)
+Thu Mar 27 12:33:34 2014 dispatch.router (DEBUG) RCVD: LSU(id=QDR.02 area=0 ls_seq=1 ls=LS(id=QDR.02 area=0 ls_seq=1 peers=['QDR.01']))
+Thu Mar 27 12:33:34 2014 dispatch.router (DEBUG) Event: new_node: id=QDR.02
+Thu Mar 27 12:33:34 2014 dispatch.router (INFO) Learned link-state from new router: QDR.02
+Thu Mar 27 12:33:34 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:34 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:35 2014 dispatch.router (INFO) New Link-State Collection:
+Thu Mar 27 12:33:35 2014 dispatch.router (INFO)   QDR.01 => ['QDR.02']
+Thu Mar 27 12:33:35 2014 dispatch.router (INFO)   QDR.02 => ['QDR.01']
+Thu Mar 27 12:33:35 2014 dispatch.router (DEBUG) Event: ls_collection_changed: {'QDR.01': LS(id=QDR.01 area=0 ls_seq=1 peers=['QDR.02']), 'QDR.02': LS(id=QDR.02 area=0 ls_seq=1 peers=['QDR.01'])}
+Thu Mar 27 12:33:35 2014 dispatch.router (DEBUG) Event: next_hops_changed: {'QDR.02': 'QDR.02'}
+Thu Mar 27 12:33:35 2014 dispatch.router (DEBUG) Event: valid_origins_changed: {'QDR.02': []}
+Thu Mar 27 12:33:35 2014 dispatch.router (DEBUG) Event: mobile_sequence_changed: 1
+Thu Mar 27 12:33:35 2014 dispatch.router (DEBUG) RCVD: MAR(id=QDR.02 area=0 have_seq=0)
+Thu Mar 27 12:33:36 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:36 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:36 2014 dispatch.router (DEBUG) Event: mobile_sequence_changed: 2
+Thu Mar 27 12:33:36 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:37 2014 dispatch.router (DEBUG) Event: mobile_sequence_changed: 3
+Thu Mar 27 12:33:37 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:37 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:37 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:39 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:39 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:39 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:40 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:40 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:40 2014 ROUTER (INFO) Registered local address: my_address
+[0xd9ae9c0]:ERROR amqp:connection:framing-error connection aborted
+[0xd9ae9c0]:ERROR[-2] connection aborted
+
+Thu Mar 27 12:33:42 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:43 2014 dispatch.router (DEBUG) Event: mobile_sequence_changed: 4
+Thu Mar 27 12:33:44 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:44 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:45 2014 dispatch.router (DEBUG) Event: mobile_sequence_changed: 5
+Thu Mar 27 12:33:45 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:45 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:45 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:47 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:47 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:47 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:49 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:49 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:49 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:50 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:50 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:50 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:52 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:52 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:52 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:54 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:54 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:54 2014 dispatch.router (DEBUG) Event: mobile_sequence_changed: 6
+Thu Mar 27 12:33:54 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:55 2014 dispatch.router (DEBUG) Event: mobile_sequence_changed: 7
+Thu Mar 27 12:33:55 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:55 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:55 2014 ROUTER (INFO) Registered local address: my_address
+Thu Mar 27 12:33:56 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:33:56 2014 SERVER (DEBUG) added listener connection
+Thu Mar 27 12:33:56 2014 ROUTER (INFO) Registered local address: my_address
+
+
+Thu Mar 27 12:34:04 2014 SERVER (DEBUG) removed listener connection
+Thu Mar 27 12:34:05 2014 dispatch.router (DEBUG) Event: mobile_sequence_changed: 8
+[0xd7382a0]:ERROR amqp:connection:framing-error connection aborted
+[0xd7382a0]:ERROR[-2] connection aborted
+
+Thu Mar 27 12:34:06 2014 dispatch.router (INFO) Router Link Lost - link_id=0
+Thu Mar 27 12:34:06 2014 dispatch.router (DEBUG) Event: lost_neighbor: id=QDR.02
+Thu Mar 27 12:34:06 2014 dispatch.router (DEBUG) Event: del_neighbor_router: router_bit=1
+Thu Mar 27 12:34:06 2014 dispatch.router (DEBUG) Event: add_remote_router: address=amqp:/_topo/0/QDR.02, router_bit=1
+Thu Mar 27 12:34:06 2014 dispatch.router (INFO) Neighbor lost: QDR.02
+Thu Mar 27 12:34:06 2014 SERVER (DEBUG) removed listener connection
+
+Listener   : 0.0.0.0:20001
+       SASL: ANONYMOUS
+        SSL: 0
+
+Listener   : 0.0.0.0:20101
+       SASL: ANONYMOUS
+        SSL: 0
+Thu Mar 27 12:34:07 2014 SERVER (INFO) Shut Down
+==2761==
+==2761== HEAP SUMMARY:
+==2761==     in use at exit: 2,500,648 bytes in 18,376 blocks
+==2761==   total heap usage: 67,023 allocs, 48,647 frees, 16,353,047 bytes allocated
+==2761==
+==2761== 6 bytes in 1 blocks are possibly lost in loss record 7 of 2,684
+==2761==    at 0x4A06409: malloc (in /usr/lib64/valgrind/vgpreload_memcheck-amd64-linux.so)
+==2761==    by 0x4C232C7: qd_config_item_value_string (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C256B3: load_server_config (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C25892: configure_listeners (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C25D5E: qd_dispatch_post_configure_connections (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x40129A: main (in /home/pmoravec/dispatch-trunk/trunk/BLD/router/qdrouterd)
+==2761==
+==2761== 7 bytes in 1 blocks are possibly lost in loss record 10 of 2,684
+==2761==    at 0x4A06409: malloc (in /usr/lib64/valgrind/vgpreload_memcheck-amd64-linux.so)
+==2761==    by 0x4C232C7: qd_config_item_value_string (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C256D5: load_server_config (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C25892: configure_listeners (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C25D5E: qd_dispatch_post_configure_connections (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x40129A: main (in /home/pmoravec/dispatch-trunk/trunk/BLD/router/qdrouterd)
+==2761==
+==2761== 8 bytes in 1 blocks are possibly lost in loss record 19 of 2,684
+==2761==    at 0x4A06409: malloc (in /usr/lib64/valgrind/vgpreload_memcheck-amd64-linux.so)
+==2761==    by 0x4C232C7: qd_config_item_value_string (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C25692: load_server_config (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C25892: configure_listeners (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x4C25D5E: qd_dispatch_post_configure_connections (in /home/pmoravec/dispatch-trunk/trunk/BLD/libqpid-dispatch.so.0.1)
+==2761==    by 0x40129A: main (in /home/pmoravec/dispatch-trunk/trunk/BLD/router/qdrouterd)

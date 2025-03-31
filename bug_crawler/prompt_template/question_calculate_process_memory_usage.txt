@@ -1,0 +1,5 @@
+Do you find any evidence that processes you mentioned have memory leak issue?
+    - Say ‘YES:{LOG INDEX}’ if you detect a memory leak issue corresponding to these two processed.
+        Also, if process A and B has a shared memory limitation, calculate if the total usage is over the limitation
+    - Say ‘NO:{INDEX}’ if there is no memory leak issue
+    - Say ‘Unsure if you need more details or context’

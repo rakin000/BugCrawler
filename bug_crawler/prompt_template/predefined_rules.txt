@@ -1,0 +1,3 @@
+There are some predefined interactions between different components observed from memory leak or OOM issue:
+    1. Interaction between Process A and Process B (inter relationship).
+    2. Process and Garbage Collection (GC), they are in different level in a system.

@@ -1,0 +1,2253 @@
+Index: src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/CapacityTaskScheduler.java
+===================================================================
+--- src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/CapacityTaskScheduler.java	(revision 701499)
++++ src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/CapacityTaskScheduler.java	(working copy)
+@@ -233,13 +233,11 @@
+       return sb.toString();
+     }
+   }
+-  
+-  
+-  /** 
+-   * This class handles the scheduling algorithms. 
+-   * The algos are the same for both Map and Reduce tasks. 
+-   * There may be slight variations later, in which case we can make this
+-   * an abstract base class and have derived classes for Map and Reduce.  
++
++  /**
++   * This class handles the scheduling algorithms. The algorithms are slightly
++   * different for both Map and Reduce tasks, and so we have two derived classes
++   * - one for scheduling map tasks and one for reduce tasks.
+    */
+   private static abstract class TaskSchedulingMgr {
+ 
+@@ -251,7 +249,12 @@
+     /** our enclosing TaskScheduler object */
+     protected CapacityTaskScheduler scheduler;
+     // for debugging
+-    protected String type = null;
++    protected TYPE type = null;
++    protected static enum TYPE {
++      MAP, REDUCE
++    }
++
++    protected long maxVmemForTasks = 0;
+ 
+     abstract Task obtainNewTask(TaskTrackerStatus taskTracker, 
+         JobInProgress job) throws IOException; 
+@@ -533,7 +536,6 @@
+       }
+     }
+ 
+-    
+     void jobAdded(JobInProgress job) {
+       // update qsi 
+       QueueSchedulingInfo qsi = 
+@@ -637,12 +639,30 @@
+           usersOverLimit.add(j.getProfile().getUser());
+           continue;
+         }
+-        // We found a suitable job. Get task from it.
+-        t = obtainNewTask(taskTracker, j);
+-        if (t != null) {
+-          LOG.debug("Got task from job " + 
+-              j.getJobID().toStringWOPrefix() + " in queue " + qsi.queueName);
+-          return t;
++
++        int pendingTasks =
++            (type == TaskSchedulingMgr.TYPE.MAP ? j.pendingMaps() : j
++                .pendingReduces());
++        if (pendingTasks != 0) {
++          if (jobFitsOnTT(j, taskTracker, this.type == TaskSchedulingMgr.TYPE.MAP)) {
++            // We found a suitable job. Get task from it.
++            t = obtainNewTask(taskTracker, j);
++            if (t != null) {
++              LOG.debug("Got task from job " + 
++                  j.getJobID().toStringWOPrefix() + " in queue " + qsi.queueName);
++              return t;
++            }
++          } else {
++            // block the cluster, till this job's tasks can be scheduled.
++            LOG.info(j.getJobID()
++                + "'s tasks don't fit on the TaskTracker "
++                + taskTracker.trackerName
++                + ". Returning no task to the taskTracker");
++            throw new InAdequateResourcesException(
++                InAdequateResourcesException.Resources.VIRTUAL_MEMORY);
++          }
++        } else {
++          LOG.info(j.getJobID() + " doesn't have any tasks to run.");
+         }
+       }
+       
+@@ -652,19 +672,30 @@
+         scheduler.jobQueuesManager.getWaitingJobQueue(qsi.queueName)) {
+         // is this job's user over limit?
+         if (usersOverLimit.contains(j.getProfile().getUser())) {
+-          // user over limit. 
++          // user over limit.
+           continue;
+         }
+-        // this job is a candidate for running. Initialize it, move it
+-        // to run queue
+-        j.initTasks();
+-        scheduler.jobQueuesManager.jobUpdated(j);
+-        // We found a suitable job. Get task from it.
+-        t = obtainNewTask(taskTracker, j);
+-        if (t != null) {
+-          LOG.debug("Getting task from job " + 
+-              j.getJobID().toStringWOPrefix() + " in queue " + qsi.queueName);
+-          return t;
++
++        if (jobFitsOnTT(j, taskTracker, this.type == TaskSchedulingMgr.TYPE.MAP)) {
++          // this job is a candidate for running. Initialize it, move it
++          // to run queue
++          j.initTasks();
++          scheduler.jobQueuesManager.jobUpdated(j);
++          // We found a suitable job. Get task from it.
++          t = obtainNewTask(taskTracker, j);
++          if (t != null) {
++            LOG.debug("Getting task from job "
++                + j.getJobID().toStringWOPrefix() + " in queue "
++                + qsi.queueName);
++            return t;
++          }
++        } else {
++          // block the cluster, till this job's tasks can be scheduled.
++          LOG.info(j.getJobID() + "'s tasks don't fit on the TaskTracker "
++              + taskTracker.trackerName
++              + ". Returning no task to the taskTracker");
++          throw new InAdequateResourcesException(
++              InAdequateResourcesException.Resources.VIRTUAL_MEMORY);
+         }
+       }
+       
+@@ -679,11 +710,28 @@
+           scheduler.jobQueuesManager.getRunningJobQueue(qsi.queueName)) {
+           if ((j.getStatus().getRunState() == JobStatus.RUNNING) && 
+               (usersOverLimit.contains(j.getProfile().getUser()))) {
+-            t = obtainNewTask(taskTracker, j);
+-            if (t != null) {
+-              LOG.debug("Getting task from job " + 
+-                  j.getJobID().toStringWOPrefix() + " in queue " + qsi.queueName);
+-              return t;
++            int pendingTasks =
++              (type == TaskSchedulingMgr.TYPE.MAP ? j.pendingMaps() : j
++                  .pendingReduces());
++            if (pendingTasks != 0) {
++              if (jobFitsOnTT(j, taskTracker, this.type == TaskSchedulingMgr.TYPE.MAP)) {
++                t = obtainNewTask(taskTracker, j);
++                if (t != null) {
++                  LOG.debug("Getting task from job " + 
++                      j.getJobID().toStringWOPrefix() + " in queue " + qsi.queueName);
++                  return t;
++                }
++              } else {
++                // block the cluster, till this job's tasks can be scheduled.
++                LOG.info(j.getJobID()
++                    + "'s tasks don't fit on the TaskTracker "
++                    + taskTracker.trackerName
++                    + ". Returning no task to the taskTracker");
++                throw new InAdequateResourcesException(
++                    InAdequateResourcesException.Resources.VIRTUAL_MEMORY);
++              }
++            } else {
++              LOG.debug(j.getJobID() + " doesn't have any tasks to run.");
+             }
+           }
+         }
+@@ -691,13 +739,24 @@
+         for (JobInProgress j: 
+           scheduler.jobQueuesManager.getWaitingJobQueue(qsi.queueName)) {
+           if (usersOverLimit.contains(j.getProfile().getUser())) {
+-            j.initTasks();
+-            scheduler.jobQueuesManager.jobUpdated(j);
+-            t = obtainNewTask(taskTracker, j);
+-            if (t != null) {
+-              LOG.debug("Getting task from job " + 
+-                  j.getJobID().toStringWOPrefix() + " in queue " + qsi.queueName);
+-              return t;
++            if (jobFitsOnTT(j, taskTracker,
++                this.type == TaskSchedulingMgr.TYPE.MAP)) {
++              j.initTasks();
++              scheduler.jobQueuesManager.jobUpdated(j);
++              t = obtainNewTask(taskTracker, j);
++              if (t != null) {
++                LOG.debug("Getting task from job "
++                    + j.getJobID().toStringWOPrefix() + " in queue "
++                    + qsi.queueName);
++                return t;
++              }
++            } else {
++              // block the cluster, till this job's tasks can be scheduled.
++              LOG.info(j.getJobID() + "'s tasks don't fit on the TaskTracker "
++                  + taskTracker.trackerName
++                  + ". Returning no task to the taskTracker");
++              throw new InAdequateResourcesException(
++                  InAdequateResourcesException.Resources.VIRTUAL_MEMORY);
+             }
+           }
+         }
+@@ -705,7 +764,36 @@
+       
+       return null;
+     }
+-    
++
++    /**
++     * Update resources' information globally across the cluster.
++     */
++    private synchronized void updateResourcesInformation() {
++      // At present, we update only the maximum job size that can run in the
++      // cluster.
++      Collection<TaskTrackerStatus> taskTrackers =
++          scheduler.taskTrackerManager.taskTrackers();
++
++      maxVmemForTasks = 0;
++      for (TaskTrackerStatus taskTrackerStatus : taskTrackers) {
++        // We need TaskTracker{Added/Removed} interface, so that this loop is
++        // run when only required.
++        long maxMemPerTaskOnTT =
++            taskTrackerStatus.getResourceStatus()
++                .getDefaultVirtualMemoryPerTask();
++        int maxNumTasks =
++            (type == TaskSchedulingMgr.TYPE.MAP ? taskTrackerStatus
++                .getMaxMapTasks() : taskTrackerStatus.getMaxReduceTasks());
++        long currentMaxVmemForTasksOnTT =
++            (maxMemPerTaskOnTT == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT
++                                  ? Long.MAX_VALUE
++                                  : maxMemPerTaskOnTT * maxNumTasks);
++        if (currentMaxVmemForTasksOnTT > maxVmemForTasks) {
++          maxVmemForTasks = currentMaxVmemForTasksOnTT;
++        }
++      }
++    }
++
+     private List<Task> assignTasks(TaskTrackerStatus taskTracker) throws IOException {
+       Task t = null;
+ 
+@@ -724,14 +812,50 @@
+        * We're only sorting a collection of queues - there shouldn't be many.
+        */
+       updateCollectionOfQSIs();
++
++      // update the resources' information.
++      updateResourcesInformation();
++
+       for (QueueSchedulingInfo qsi: qsiForAssigningTasks) {
+-        t = getTaskFromQueue(taskTracker, qsi);
+-        if (t!= null) {
+-          // we have a task. Update reclaimed resource info
+-          updateReclaimedResources(qsi);
+-          return Collections.singletonList(t);
++
++        // Kill all the jobs that cannot run in the cluster because of invalid
++        // resource requirements.
++        for (JobInProgress jip : scheduler.jobQueuesManager
++            .getRunningJobQueue(qsi.queueName)) {
++          if (jip.getMaxVirtualMemoryForTask() > maxVmemForTasks) {
++            // This job ran earlier, but all TTs that could run this job have
++            // gone down.
++            if (!jip.isKillInProgress()) {
++              jip.kill();
++            }
++          }
++        }
++
++        for (JobInProgress jip : scheduler.jobQueuesManager
++            .getWaitingJobQueue(qsi.queueName)) {
++          if (jip.getMaxVirtualMemoryForTask() > maxVmemForTasks) {
++            // No TT in the cluster can run this job.
++            if (!jip.isKillInProgress()) {
++              jip.kill(); // TODO: do it for client side killJob
++            }
++          }
++        }
++
++        try {
++          t = getTaskFromQueue(taskTracker, qsi);
++          if (t != null) {
++            // we have a task. Update reclaimed resource info
++            updateReclaimedResources(qsi);
++            return Collections.singletonList(t);
++          }
++        } catch (InAdequateResourcesException iare) {
++          // InAdequate resources. Look for other type of tasks if possible.
++          // Otherwise return null to TT. This means blocking the cluster till
++          // this job is served.
++          LOG.debug(iare);
++          return null;
+         }
+-      }        
++      }
+ 
+       // nothing to give
+       return null;
+@@ -756,15 +880,88 @@
+       return this.queueInfoMap.get(queueName) ;
+     }
+ 
++    /**
++     * Check if the job's tasks fit on this TT
++     * @param job
++     * @param taskTracker
++     * @param isMap type of task to check
++     * @return true if the job's task fits, false otherwise.
++     */
++    private boolean jobFitsOnTT(JobInProgress job,
++        TaskTrackerStatus taskTracker, boolean isMap) {
++      // At present, we have checks only for memory.
++
++      LOG.info("freeMemOnTTForMap = "
++          + taskTracker.getResourceStatus().getFreeVirtualMemoryForMaps()
++          + " freeMemOnTTForReduce = "
++          + taskTracker.getResourceStatus().getFreeVirtualMemoryForReduces()
++          + " defaultMemPerTaskOnTT = "
++          + taskTracker.getResourceStatus().getDefaultVirtualMemoryPerTask()
++          + " jobMemForTask = " + job.getMaxVirtualMemoryForTask());
++
++      // 1. TT can run any job if it doesn't enforce memory limits or
++      // 2. Job with no memory requirements can fit on any TT.
++      if (taskTracker.getResourceStatus().getDefaultVirtualMemoryPerTask() ==
++                          JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT
++          || job.getMaxVirtualMemoryForTask() ==
++                          JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
++        LOG.debug("Job " + job.getJobID() + " fits on TT "
++            + taskTracker.trackerName + " Tasktype : "
++            + (isMap ? "Map" : "Reduce")
++            + " . Reason: one of job or TT has memLimits disabled");
++        return true;
++      }
++
++      // TT enforces memory limits and job specifies its requirements.
++
++      // 1. TT doesn't have enough memory or
++      // 2. TT has enough memory but the job needs more than what TT offers.
++      long freeMemOnTT =
++          (isMap ? taskTracker.getResourceStatus()
++              .getFreeVirtualMemoryForMaps() : taskTracker.getResourceStatus()
++              .getFreeVirtualMemoryForReduces());
++      if (freeMemOnTT < taskTracker.getResourceStatus()
++          .getDefaultVirtualMemoryPerTask()
++          || job.getMaxVirtualMemoryForTask() > freeMemOnTT) {
++        LOG.info("Job " + job.getJobID() + " doesn't fit on TT "
++            + taskTracker.trackerName + " Tasktype : "
++            + (isMap ? "Map" : "Reduce")
++            + " . Reason : TT doesn't have enough memory."
++            + "Or Job needs more than what TT offers.");
++        return false;
++      }
++
++      LOG.info("Job " + job.getJobID() + " fits on TT "
++          + taskTracker.trackerName + " Tasktype : "
++          + (isMap ? "Map" : "Reduce"));
++      return true;
++    }
+   }
+ 
++  private static class InAdequateResourcesException extends IOException {
++    private static final long serialVersionUID = 1L;
++
++    static enum Resources {
++      VIRTUAL_MEMORY
++    }
++
++    public InAdequateResourcesException() {
++      super("Insufficient resources.");
++    }
++
++    public InAdequateResourcesException(
++        InAdequateResourcesException.Resources resource) {
++      super("Insufficient resources for " + resource.toString());
++    }
++  }
++
+   /**
+    * The scheduling algorithms for map tasks. 
+    */
+   private static class MapSchedulingMgr extends TaskSchedulingMgr {
+     MapSchedulingMgr(CapacityTaskScheduler dad) {
+       super(dad);
+-      type = new String("map");
++      type = TaskSchedulingMgr.TYPE.MAP;
+     }
+     Task obtainNewTask(TaskTrackerStatus taskTracker, JobInProgress job) 
+     throws IOException {
+@@ -841,7 +1038,7 @@
+   private static class ReduceSchedulingMgr extends TaskSchedulingMgr {
+     ReduceSchedulingMgr(CapacityTaskScheduler dad) {
+       super(dad);
+-      type = new String("reduce");
++      type = TaskSchedulingMgr.TYPE.REDUCE;
+     }
+     Task obtainNewTask(TaskTrackerStatus taskTracker, JobInProgress job) 
+     throws IOException {
+@@ -885,7 +1082,7 @@
+       return tasksKilled;
+     }
+   }
+-  
++
+   /** the scheduling mgrs for Map and Reduce tasks */ 
+   protected TaskSchedulingMgr mapScheduler = new MapSchedulingMgr(this);
+   protected TaskSchedulingMgr reduceScheduler = new ReduceSchedulingMgr(this);
+@@ -899,12 +1096,12 @@
+    * heartbeats left. */
+   private static final int HEARTBEATS_LEFT_BEFORE_KILLING = 3;
+ 
+-  private static final Log LOG = LogFactory.getLog(CapacityTaskScheduler.class);
++  static final Log LOG = LogFactory.getLog(CapacityTaskScheduler.class);
+   protected JobQueuesManager jobQueuesManager;
+   protected CapacitySchedulerConf rmConf;
+   /** whether scheduler has started or not */
+   private boolean started = false;
+-  
++
+   /**
+    * Used to distribute/reclaim excess capacity among queues
+    */ 
+@@ -1070,7 +1267,7 @@
+     reduceScheduler.updateQSIObjects();
+     reduceScheduler.updateCollectionOfQSIs();
+   }
+-  
++
+   /* 
+    * The grand plan for assigning a task. 
+    * First, decide whether a Map or Reduce task should be given to a TT 
+@@ -1095,16 +1292,18 @@
+      * Number of ways to do this. For now, base decision on how much is needed
+      * versus how much is used (default to Map, if equal).
+      */
+-    LOG.debug("TT asking for task, max maps=" + taskTracker.getMaxMapTasks() + 
+-        ", run maps=" + taskTracker.countMapTasks() + ", max reds=" + 
+-        taskTracker.getMaxReduceTasks() + ", run reds=" + 
+-        taskTracker.countReduceTasks() + ", map cap=" + 
+-        mapScheduler.getClusterCapacity() + ", red cap = " + 
+-        reduceScheduler.getClusterCapacity());
+     int maxMapTasks = taskTracker.getMaxMapTasks();
+     int currentMapTasks = taskTracker.countMapTasks();
+     int maxReduceTasks = taskTracker.getMaxReduceTasks();
+     int currentReduceTasks = taskTracker.countReduceTasks();
++    if (LOG.isDebugEnabled()) {
++      LOG.debug("TT asking for task, max maps=" + maxMapTasks + ", run maps="
++          + currentMapTasks + ", max reds=" + maxReduceTasks + ", run reds="
++          + currentReduceTasks + ", map cap="
++          + mapScheduler.getClusterCapacity() + ", red cap = "
++          + reduceScheduler.getClusterCapacity());
++    }
++
+     if ((maxReduceTasks - currentReduceTasks) > 
+     (maxMapTasks - currentMapTasks)) {
+       tasks = reduceScheduler.assignTasks(taskTracker);
+Index: src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/JobQueuesManager.java
+===================================================================
+--- src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/JobQueuesManager.java	(revision 701499)
++++ src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/JobQueuesManager.java	(working copy)
+@@ -154,7 +154,8 @@
+   
+   @Override
+   public void jobAdded(JobInProgress job) {
+-    LOG.info("Job submitted to queue " + job.getProfile().getQueueName());
++    LOG.info("Job " + job.getJobID().toString() + "submitted to queue "
++        + job.getProfile().getQueueName());
+     // add job to the right queue
+     QueueInfo qi = jobQueues.get(job.getProfile().getQueueName());
+     if (null == qi) {
+Index: src/contrib/capacity-scheduler/src/test/org/apache/hadoop/mapred/TestCapacityScheduler.java
+===================================================================
+--- src/contrib/capacity-scheduler/src/test/org/apache/hadoop/mapred/TestCapacityScheduler.java	(revision 701499)
++++ src/contrib/capacity-scheduler/src/test/org/apache/hadoop/mapred/TestCapacityScheduler.java	(working copy)
+@@ -32,12 +32,22 @@
+ 
+ import junit.framework.TestCase;
+ 
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.io.BytesWritable;
+-//import org.apache.hadoop.mapred.CapacityTaskScheduler;
++import org.apache.hadoop.util.StringUtils;
++
+ import org.apache.hadoop.conf.Configuration;
+ 
++/**
++ * Test the CapacityTaskScheduler.
++ *
++ */
+ public class TestCapacityScheduler extends TestCase {
+-  
++
++  static final Log LOG =
++      LogFactory.getLog(org.apache.hadoop.mapred.TestCapacityScheduler.class);
++
+   private static int jobCounter;
+   
+   static class FakeJobInProgress extends JobInProgress {
+@@ -51,13 +61,11 @@
+       new HashSet<TaskInProgress>();
+     
+     public FakeJobInProgress(JobID jId, JobConf jobConf,
+-        FakeTaskTrackerManager taskTrackerManager, String user) 
+-    throws IOException {
++        FakeTaskTrackerManager taskTrackerManager, String user) {
+       super(jId, jobConf);
+       this.taskTrackerManager = taskTrackerManager;
+       this.startTime = System.currentTimeMillis();
+-      this.status = new JobStatus();
+-      this.status.setRunState(JobStatus.PREP);
++      this.status = new JobStatus(jId, 0 , 0, 0, JobStatus.PREP);
+       if (null == jobConf.getQueueName()) {
+         this.profile = new JobProfile(user, jId, 
+             null, null, null);
+@@ -68,6 +76,7 @@
+       }
+       mapTaskCtr = 0;
+       redTaskCtr = 0;
++      super.setMaxVirtualMemoryForTask(jobConf.getMaxVirtualMemoryForTask());
+     }
+     
+     @Override
+@@ -82,11 +91,15 @@
+       TaskAttemptID attemptId = getTaskAttemptID(true);
+       Task task = new MapTask("", attemptId, 0, "", new BytesWritable()) {
+         @Override
++        public Configuration getConf() {
++          return getJobConf();
++        }
++        @Override
+         public String toString() {
+           return String.format("%s on %s", getTaskID(), tts.getTrackerName());
+         }
+       };
+-      taskTrackerManager.startTask(tts.getTrackerName(), task);
++      taskTrackerManager.markTaskAsRunning(tts.getTrackerName(), task);
+       runningMapTasks++;
+       // create a fake TIP and keep track of it
+       mapTips.add(new FakeTaskInProgress(getJobID(), 
+@@ -101,11 +114,15 @@
+       TaskAttemptID attemptId = getTaskAttemptID(false);
+       Task task = new ReduceTask("", attemptId, 0, 10) {
+         @Override
++        public Configuration getConf() {
++          return getJobConf();
++        }
++        @Override
+         public String toString() {
+           return String.format("%s on %s", getTaskID(), tts.getTrackerName());
+         }
+       };
+-      taskTrackerManager.startTask(tts.getTrackerName(), task);
++      taskTrackerManager.markTaskAsRunning(tts.getTrackerName(), task);
+       runningReduceTasks++;
+       // create a fake TIP and keep track of it
+       reduceTips.add(new FakeTaskInProgress(getJobID(), 
+@@ -190,7 +207,7 @@
+       return queues;
+     }
+   }
+-  
++
+   static class FakeTaskTrackerManager implements TaskTrackerManager {
+     int maps = 0;
+     int reduces = 0;
+@@ -202,16 +219,25 @@
+     
+     private Map<String, TaskTrackerStatus> trackers =
+       new HashMap<String, TaskTrackerStatus>();
+-    private Map<String, TaskStatus> taskStatuses = 
+-      new HashMap<String, TaskStatus>();
++    private Map<String, Map<String,TaskStatus>> taskStatuses = 
++      new HashMap<String, Map<String,TaskStatus>>();
++    private Map<JobID, Long> jobIDToVmem = new HashMap<JobID, Long>();
+ 
+     public FakeTaskTrackerManager() {
+-      trackers.put("tt1", new TaskTrackerStatus("tt1", "tt1.host", 1,
+-          new ArrayList<TaskStatus>(), 0,
+-          maxMapTasksPerTracker, maxReduceTasksPerTracker));
+-      trackers.put("tt2", new TaskTrackerStatus("tt2", "tt2.host", 2,
+-          new ArrayList<TaskStatus>(), 0,
+-          maxMapTasksPerTracker, maxReduceTasksPerTracker));
++      this(2, 2, 1);
++    }
++
++    public FakeTaskTrackerManager(int numTaskTrackers,
++        int maxMapTasksPerTracker, int maxReduceTasksPerTracker) {
++      this.maxMapTasksPerTracker = maxMapTasksPerTracker;
++      this.maxReduceTasksPerTracker = maxReduceTasksPerTracker;
++      for (int i = 1; i < numTaskTrackers + 1; i++) {
++        String ttName = "tt" + i;
++        trackers.put(ttName, new TaskTrackerStatus(ttName, ttName + ".host", i,
++            new ArrayList<TaskStatus>(), 0, maxMapTasksPerTracker,
++            maxReduceTasksPerTracker));
++        taskStatuses.put(ttName, new HashMap<String ,TaskStatus>());
++      }
+     }
+     
+     public void addTaskTracker(String ttName) {
+@@ -219,6 +245,10 @@
+           new ArrayList<TaskStatus>(), 0,
+           maxMapTasksPerTracker, maxReduceTasksPerTracker));
+     }
++
++    public void removeTaskTracker(String ttName) {
++      trackers.remove(ttName);
++    }
+     
+     public ClusterStatus getClusterStatus() {
+       int numTrackers = trackers.size();
+@@ -259,7 +289,7 @@
+       return trackers.get(trackerID);
+     }
+     
+-    public void startTask(String taskTrackerName, final Task t) {
++    public void markTaskAsRunning(String taskTrackerName, final Task t) {
+       if (t.isMapTask()) {
+         maps++;
+       } else {
+@@ -267,18 +297,36 @@
+       }
+       TaskStatus status = new TaskStatus() {
+         @Override
++        public TaskAttemptID getTaskID() {
++          return t.getTaskID();
++        }
++
++        @Override
+         public boolean getIsMap() {
+-          return t.isMapTask();
++         return t.isMapTask();
+         }
+       };
+-      taskStatuses.put(t.getTaskID().toString(), status);
+       status.setRunState(TaskStatus.State.RUNNING);
++
++      long taskMemory = ((JobConf) t.getConf()).getMaxVirtualMemoryForTask();
++      long taskTrackerMemoryPerSlot =
++          trackers.get(taskTrackerName).getResourceStatus()
++              .getDefaultVirtualMemoryPerTask();
++      if (taskMemory == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
++        taskMemory = taskTrackerMemoryPerSlot;
++      }
++      if (!jobIDToVmem.containsKey(t.getTaskID().getJobID())) {
++        LOG.debug("JOB TASK'S MEMORY " + t.getTaskID().getJobID() + " : "
++            + taskMemory);
++        jobIDToVmem.put(t.getTaskID().getJobID(), Long.valueOf(taskMemory));
++      }
++      taskStatuses.get(taskTrackerName).put(t.getTaskID().toString(), status);
+       trackers.get(taskTrackerName).getTaskReports().add(status);
+     }
+-    
+-    public void finishTask(String taskTrackerName, String tipId, 
++
++    public void markTaskAsFinished(String taskTrackerName, String tipId, 
+         FakeJobInProgress j) {
+-      TaskStatus status = taskStatuses.get(tipId);
++      TaskStatus status = taskStatuses.get(taskTrackerName).remove(tipId);
+       if (status.getIsMap()) {
+         maps--;
+         j.mapTaskFinished();
+@@ -288,6 +336,7 @@
+       }
+       status.setRunState(TaskStatus.State.SUCCEEDED);
+     }
++
+     
+     void addQueues(String[] arr) {
+       Set<String> queues = new HashSet<String>();
+@@ -300,6 +349,37 @@
+     public QueueManager getQueueManager() {
+       return qm;
+     }
++
++    public void updateFreeMemoryOnTT(String trackerID) {
++      TaskTrackerStatus tt = trackers.get(trackerID);
++      if (tt.getResourceStatus().getDefaultVirtualMemoryPerTask() ==
++                                JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
++        return;
++      }
++
++      long freeMemoryOnTTForMaps =
++          tt.getResourceStatus().getDefaultVirtualMemoryPerTask()
++              * tt.getMaxMapTasks();
++      long freeMemoryOnTTForReduces =
++          tt.getResourceStatus().getDefaultVirtualMemoryPerTask()
++              * tt.getMaxReduceTasks();
++      Map<String, TaskStatus> tasksOnTT = taskStatuses.get(trackerID);
++      for (TaskStatus taskStatus : tasksOnTT.values()) {
++        if (taskStatus.getRunState() == TaskStatus.State.RUNNING) {
++          LOG.info(taskStatus.getTaskID().getJobID());
++          if (taskStatus.getIsMap()) {
++            freeMemoryOnTTForMaps -=
++                jobIDToVmem.get(taskStatus.getTaskID().getJobID()).longValue();
++          } else {
++            freeMemoryOnTTForReduces -=
++                jobIDToVmem.get(taskStatus.getTaskID().getJobID()).longValue();
++          }
++        }
++      }
++      tt.getResourceStatus().setFreeVirtualMemoryForMaps(freeMemoryOnTTForMaps);
++      tt.getResourceStatus().setFreeVirtualMemoryForReduces(
++          freeMemoryOnTTForReduces);
++    }
+   }
+   
+   // represents a fake queue configuration info
+@@ -383,39 +463,51 @@
+   private FakeClock clock;
+ 
+   @Override
+-  protected void setUp() throws Exception {
++  protected void setUp() {
++    setUp(2, 2, 1);
++  }
++
++  private void setUp(int numTaskTrackers, int numMapTasksPerTracker,
++      int numReduceTasksPerTracker) {
+     jobCounter = 0;
+-    taskTrackerManager = new FakeTaskTrackerManager();
++    taskTrackerManager =
++        new FakeTaskTrackerManager(numTaskTrackers, numMapTasksPerTracker,
++            numReduceTasksPerTracker);
+     clock = new FakeClock();
+     scheduler = new CapacityTaskScheduler(clock);
+     scheduler.setTaskTrackerManager(taskTrackerManager);
+-
+     conf = new JobConf();
+     // set interval to a large number so thread doesn't interfere with us
+     conf.setLong("mapred.capacity-scheduler.reclaimCapacity.interval", 500);
+     scheduler.setConf(conf);
+-    
+   }
+-  
++
+   @Override
+   protected void tearDown() throws Exception {
+     if (scheduler != null) {
+       scheduler.terminate();
+     }
+   }
+-  
++
++  private FakeJobInProgress submitJob(int state, JobConf jobConf) {
++    FakeJobInProgress job =
++        new FakeJobInProgress(new JobID("test", ++jobCounter),
++            (jobConf == null ? new JobConf() : jobConf), taskTrackerManager,
++            jobConf.getUser());
++    job.getStatus().setRunState(state);
++    taskTrackerManager.submitJob(job);
++    return job;
++  }
++
+   private FakeJobInProgress submitJob(int state, int maps, int reduces, 
+-      String queue, String user) throws IOException {
++      String queue, String user) {
+     JobConf jobConf = new JobConf(conf);
+     jobConf.setNumMapTasks(maps);
+     jobConf.setNumReduceTasks(reduces);
+     if (queue != null)
+       jobConf.setQueueName(queue);
+-    FakeJobInProgress job = new FakeJobInProgress(
+-        new JobID("test", ++jobCounter), jobConf, taskTrackerManager, user);
+-    job.getStatus().setRunState(state);
+-    taskTrackerManager.submitJob(job);
+-    return job;
++    jobConf.setUser(user);
++    return submitJob(state, jobConf);
+   }
+   
+   /*protected void submitJobs(int number, int state, int maps, int reduces)
+@@ -449,6 +541,7 @@
+     // now when we get a task, it should be from the second job
+     t = checkAssignment("tt2", "attempt_test_0002_m_000001_0 on tt2");
+   }
++
+   
+   public void testGetJobs() throws Exception {
+     // need only one queue
+@@ -613,17 +706,17 @@
+     // Submit another job, from a different user
+     FakeJobInProgress j2 = submitJob(JobStatus.PREP, 10, 10, "q2", "u2");
+     // one of the task finishes
+-    taskTrackerManager.finishTask("tt1", "attempt_test_0001_m_000001_0", j1);
++    taskTrackerManager.markTaskAsFinished("tt1", "attempt_test_0001_m_000001_0", j1);
+     // Now if I ask for a map task, it should come from the second job 
+     checkAssignment("tt1", "attempt_test_0002_m_000001_0 on tt1");
+     // another task from job1 finishes, another new task to job2
+-    taskTrackerManager.finishTask("tt1", "attempt_test_0001_m_000002_0", j1);
++    taskTrackerManager.markTaskAsFinished("tt1", "attempt_test_0001_m_000002_0", j1);
+     checkAssignment("tt1", "attempt_test_0002_m_000002_0 on tt1");
+     // now we have equal number of tasks from each job. Whichever job's
+     // task finishes, that job gets a new task
+-    taskTrackerManager.finishTask("tt2", "attempt_test_0001_m_000003_0", j1);
++    taskTrackerManager.markTaskAsFinished("tt2", "attempt_test_0001_m_000003_0", j1);
+     checkAssignment("tt2", "attempt_test_0001_m_000005_0 on tt2");
+-    taskTrackerManager.finishTask("tt1", "attempt_test_0002_m_000001_0", j2);
++    taskTrackerManager.markTaskAsFinished("tt1", "attempt_test_0002_m_000001_0", j2);
+     checkAssignment("tt1", "attempt_test_0002_m_000003_0 on tt1");
+   }
+ 
+@@ -631,17 +724,15 @@
+   public void testUserLimits4() throws Exception {
+     // set up one queue, with 10 slots
+     String[] qs = {"default"};
++    taskTrackerManager = new FakeTaskTrackerManager(5, 2, 1);
+     taskTrackerManager.addQueues(qs);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
+     resConf = new FakeResourceManagerConf();
+     ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
+     queues.add(new FakeQueueInfo("default", 100.0f, 10000, true, 25));
+     resConf.setFakeQueues(queues);
+     scheduler.setResourceManagerConf(resConf);
+     scheduler.start();
+-    // add some more TTs 
+-    taskTrackerManager.addTaskTracker("tt3");
+-    taskTrackerManager.addTaskTracker("tt4");
+-    taskTrackerManager.addTaskTracker("tt5");
+ 
+     // u1 submits job
+     FakeJobInProgress j1 = submitJob(JobStatus.PREP, 10, 10, null, "u1");
+@@ -661,7 +752,7 @@
+     // last slot should go to u1, since u2 has no more tasks
+     checkAssignment("tt5", "attempt_test_0001_m_000006_0 on tt5");
+     // u1 finishes a task
+-    taskTrackerManager.finishTask("tt5", "attempt_test_0001_m_000006_0", j1);
++    taskTrackerManager.markTaskAsFinished("tt5", "attempt_test_0001_m_000006_0", j1);
+     // u1 submits a few more jobs 
+     submitJob(JobStatus.PREP, 10, 10, null, "u1");
+     submitJob(JobStatus.PREP, 10, 10, null, "u1");
+@@ -674,10 +765,10 @@
+     // user limits have changed and u1/u2 are over limits
+     checkAssignment("tt5", "attempt_test_0007_m_000001_0 on tt5");
+     // some other task finishes and u3 gets it
+-    taskTrackerManager.finishTask("tt5", "attempt_test_0002_m_000004_0", j1);
++    taskTrackerManager.markTaskAsFinished("tt5", "attempt_test_0002_m_000004_0", j1);
+     checkAssignment("tt5", "attempt_test_0007_m_000002_0 on tt5");
+     // now, u2 finishes a task
+-    taskTrackerManager.finishTask("tt4", "attempt_test_0002_m_000002_0", j1);
++    taskTrackerManager.markTaskAsFinished("tt4", "attempt_test_0002_m_000002_0", j1);
+     // next slot will go to u1, since u3 has nothing to run and u1's job is 
+     // first in the queue
+     checkAssignment("tt4", "attempt_test_0001_m_000007_0 on tt4");
+@@ -730,7 +821,10 @@
+   public void testReclaimCapacity2() throws Exception {
+     // set up some queues
+     String[] qs = {"default", "q2", "q3", "q4"};
++    // add some more TTs so our total map capacity is 10
++    taskTrackerManager = new FakeTaskTrackerManager(5, 2, 1);
+     taskTrackerManager.addQueues(qs);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
+     resConf = new FakeResourceManagerConf();
+     ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
+     queues.add(new FakeQueueInfo("default", 50.0f, 1000000, true, 25));
+@@ -740,11 +834,6 @@
+     resConf.setFakeQueues(queues);
+     scheduler.setResourceManagerConf(resConf);
+     scheduler.start();
+-    
+-    // add some more TTs so our total map capacity is 10
+-    taskTrackerManager.addTaskTracker("tt3");
+-    taskTrackerManager.addTaskTracker("tt4");
+-    taskTrackerManager.addTaskTracker("tt5");
+ 
+     // q2 has nothing running, default is under cap, q3 and q4 are over cap
+     FakeJobInProgress j1 = submitJob(JobStatus.PREP, 2, 2, null, "u1");
+@@ -832,10 +921,170 @@
+     
+   }
+ 
++  /**
++   * Test HighRamJobs.
++   * @throws IOException
++   */
++  public void testHighRAMJobs()
++  throws IOException {
++
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(2, 2, 2);
++    LOG.debug("Setting 1GB memory per slot on TT");
++    taskTrackerManager.getTaskTracker("tt1").getResourceStatus()
++        .setDefaultVirtualMemoryPerTask(1024 * 1024 * 1024L);
++    taskTrackerManager.getTaskTracker("tt2").getResourceStatus()
++        .setDefaultVirtualMemoryPerTask(1024 * 1024 * 1024L);
++    taskTrackerManager.addQueues(new String[] { "default" });
++    resConf = new FakeResourceManagerConf();
++    ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
++    queues.add(new FakeQueueInfo("default", 50.0f, 1000000, true, 25));
++    resConf.setFakeQueues(queues);
++    scheduler.setResourceManagerConf(resConf);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    scheduler.start();
++
++    LOG.debug("Submit one high ram(1.5BG) job of 3 map tasks.");
++    JobConf jConf = new JobConf();
++    jConf.setMaxVirtualMemoryForTask(1536 * 1024 * 1024L); // 1.5GB job
++    jConf.setNumMapTasks(3);
++    jConf.setNumReduceTasks(0);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    FakeJobInProgress job1 = submitJob(JobStatus.RUNNING, jConf);
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    checkAssignment("tt1", "attempt_test_0001_m_000001_0 on tt1");
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt2", "attempt_test_0001_m_000002_0 on tt2");
++
++    // No more tasks of this high ram jobs can run on any of the TTs
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    assertNull(scheduler.assignTasks(tracker("tt2")));
++
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1"))); // still nothing
++    // Let attempt_test_0001_m_000002_0 finish, task assignment should succeed.
++    taskTrackerManager.markTaskAsFinished("tt2",
++        "attempt_test_0001_m_000002_0", job1);
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt2", "attempt_test_0001_m_000003_0 on tt2"); // Yes, this
++    // cycle.
++
++    LOG.debug("Submit normal(1GB) job of 2 map and 2 reduce tasks.");
++    jConf.setMaxVirtualMemoryForTask(1024 * 1024 * 1024L); // 1GB job
++    jConf.setNumMapTasks(2);
++    jConf.setNumReduceTasks(2);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    submitJob(JobStatus.RUNNING, jConf); // job2
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    checkAssignment("tt1", "attempt_test_0002_r_000001_0 on tt1");
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt2", "attempt_test_0002_r_000002_0 on tt2");
++
++    // Finish High-ram job and run the smaller one
++    taskTrackerManager.markTaskAsFinished("tt1",
++        "attempt_test_0001_m_000001_0", job1);
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    checkAssignment("tt1", "attempt_test_0002_m_000001_0 on tt1");
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt1", "attempt_test_0002_m_000002_0 on tt1");
++  }
++
++  /**
++   * test invalid highRAMJobs
++   * @throws IOException
++   */
++  public void testHighRAMJobWithInvalidRequirements()
++      throws IOException {
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(2, 2, 2);
++    taskTrackerManager.getTaskTracker("tt1").getResourceStatus()
++        .setDefaultVirtualMemoryPerTask(1024 * 1024 * 1024L);
++    taskTrackerManager.getTaskTracker("tt2").getResourceStatus()
++    .setDefaultVirtualMemoryPerTask(2048 * 1024 * 1024L);
++    resConf = new FakeResourceManagerConf();
++    ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
++    queues.add(new FakeQueueInfo("default", 50.0f, 1000000, true, 25));
++    taskTrackerManager.addQueues(new String[] { "default" });
++    resConf.setFakeQueues(queues);
++    scheduler.setResourceManagerConf(resConf);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    scheduler.start();
++
++    LOG.debug("Submit one invalid high ram(5GB) job of 1 map, 0 reduce tasks.");
++    JobConf jConf = new JobConf();
++    jConf.setMaxVirtualMemoryForTask(5120 * 1024 * 1024L); // 5GB job
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(0);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    FakeJobInProgress job1 = submitJob(JobStatus.PREP, jConf);
++    FakeJobInProgress job2 = submitJob(JobStatus.RUNNING, jConf);
++    // TTs should not run these jobs
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    assertNull(scheduler.assignTasks(tracker("tt2")));
++    // Map-scheduler kills these jobs
++
++    assertTrue(job1.isKillInProgress());
++    assertTrue(job2.isKillInProgress());
++  }
++
++  /**
++   * test highRAMJob that becomes invalid after submission. This occurs if all
++   * TTs running this job go down and not alive TT can run this job.
++   * 
++   * @throws IOException
++   */
++  public void testHighRAMJobThatBecomesInvalid()
++      throws IOException {
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(2, 2, 2);
++    taskTrackerManager.getTaskTracker("tt1").getResourceStatus()
++        .setDefaultVirtualMemoryPerTask(1024 * 1024 * 1024L);
++    taskTrackerManager.getTaskTracker("tt2").getResourceStatus()
++    .setDefaultVirtualMemoryPerTask(2048 * 1024 * 1024L);
++    resConf = new FakeResourceManagerConf();
++    ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
++    queues.add(new FakeQueueInfo("default", 50.0f, 1000000, true, 25));
++    taskTrackerManager.addQueues(new String[] { "default" });
++    resConf.setFakeQueues(queues);
++    scheduler.setResourceManagerConf(resConf);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    scheduler.start();
++
++    LOG.debug("Submit one invalid high ram(5GB) job of 1 map, 0 reduce tasks.");
++    JobConf jConf = new JobConf();
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(0);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    jConf.setMaxVirtualMemoryForTask(3072 * 1024 * 1024L); // 3 GB
++    FakeJobInProgress job1 = submitJob(JobStatus.RUNNING, jConf);
++    // TT1 cannot run this job.
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++    // TT2 can run this job.
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt2", "attempt_test_0001_m_000001_0 on tt2");
++    // TT2 has gone down.
++    taskTrackerManager.removeTaskTracker("tt2");
++    // Heartbeat of TT1 triggers job kill.
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++
++    // Job should be killed because no TT can run it now.
++    assertTrue(job1.isKillInProgress());
++  }
++
+   protected TaskTrackerStatus tracker(String taskTrackerName) {
+     return taskTrackerManager.getTaskTracker(taskTrackerName);
+   }
+-  
++
+   protected Task checkAssignment(String taskTrackerName,
+       String expectedTaskString) throws IOException {
+     List<Task> tasks = scheduler.assignTasks(tracker(taskTrackerName));
+@@ -844,5 +1093,4 @@
+     assertEquals(expectedTaskString, tasks.get(0).toString());
+     return tasks.get(0);
+   }
+-  
+ }
+Index: src/mapred/org/apache/hadoop/mapred/JobInProgress.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/JobInProgress.java	(revision 701499)
++++ src/mapred/org/apache/hadoop/mapred/JobInProgress.java	(working copy)
+@@ -86,6 +86,8 @@
+   private volatile boolean jobKilled = false;
+   private volatile boolean jobFailed = false;
+ 
++  private boolean killInProgress = false;
++
+   JobPriority priority = JobPriority.NORMAL;
+   JobTracker jobtracker = null;
+ 
+@@ -238,7 +240,7 @@
+     this.nonRunningReduces = new LinkedList<TaskInProgress>();    
+     this.runningReduces = new LinkedHashSet<TaskInProgress>();
+     this.resourceEstimator = new ResourceEstimator(this);
+-    this.maxVirtualMemoryForTask = conf.getMaxVirtualMemoryForTask();
++    setMaxVirtualMemoryForTask(conf.getMaxVirtualMemoryForTask());
+   }
+ 
+   /**
+@@ -491,6 +493,10 @@
+   public long getMaxVirtualMemoryForTask() {
+     return maxVirtualMemoryForTask;
+   }
++
++  public void setMaxVirtualMemoryForTask(long mem) {
++    this.maxVirtualMemoryForTask = mem;
++  }
+   
+   // Update the job start/launch time (upon restart) and log to history
+   synchronized void updateJobTime(long startTime, long launchTime) {
+@@ -1783,6 +1789,7 @@
+   private synchronized void terminate(int jobTerminationState) {
+     if ((status.getRunState() == JobStatus.RUNNING) ||
+          (status.getRunState() == JobStatus.PREP)) {
++      killInProgress = true;
+       LOG.info("Killing job '" + this.status.getJobID() + "'");
+       this.runningMapTasks = 0;
+       this.runningReduceTasks = 0;
+@@ -1809,7 +1816,16 @@
+   public synchronized void kill() {
+     terminate(JobStatus.KILLED);
+   }
+-  
++
++  /**
++   * A kill request is already issued?
++   * 
++   * @return true if kill has already been issues and in progress.
++   */
++  synchronized boolean isKillInProgress() {
++    return killInProgress;
++  }
++
+   /**
+    * Fails the job and all its component tasks.
+    */
+@@ -2053,6 +2069,8 @@
+     this.runningMapCache = null;
+     this.nonRunningReduces = null;
+     this.runningReduces = null;
++
++    LOG.info("Job " + jobId.toString() + " killed successfully.");
+   }
+ 
+   /**
+Index: src/mapred/org/apache/hadoop/mapred/JobQueueTaskScheduler.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/JobQueueTaskScheduler.java	(revision 701499)
++++ src/mapred/org/apache/hadoop/mapred/JobQueueTaskScheduler.java	(working copy)
+@@ -22,6 +22,8 @@
+ import java.util.Collections;
+ import java.util.List;
+ 
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ 
+ /**
+@@ -29,13 +31,68 @@
+  * by default).
+  */
+ class JobQueueTaskScheduler extends TaskScheduler {
++
++  private static final Log LOG =
++      LogFactory.getLog("org.apache.hadoop.mapred.JobQueueTaskScheduler");
+   
+   private static final int MIN_CLUSTER_SIZE_FOR_PADDING = 3;
+   
+   protected JobQueueJobInProgressListener jobQueueJobInProgressListener;
+   private EagerTaskInitializationListener eagerTaskInitializationListener;
+   private float padFraction;
+-  
++
++  protected long maxVmemForMapTasks = 0;
++  protected long maxVmemForReduceTasks = 0;
++
++  private boolean jobFitsOnTT(JobInProgress job, TaskTrackerStatus taskTracker,
++      boolean isMap) {
++    // At present, we have checks only for memory.
++
++    LOG.debug("freeMemonTTForMap = "
++        + taskTracker.getResourceStatus().getFreeVirtualMemoryForMaps()
++        + "freeMemOnTTForReduce = "
++        + taskTracker.getResourceStatus().getFreeVirtualMemoryForReduces()
++        + " defaultMemPerTaskOnTT = "
++        + taskTracker.getResourceStatus().getDefaultVirtualMemoryPerTask()
++        + " jobMemForTask = " + job.getMaxVirtualMemoryForTask());
++
++    // 1. TT can run any job if it doesn't enforce memory limits or
++    // 2. Job with no memory requirements can fit on any TT.
++    if (taskTracker.getResourceStatus().getDefaultVirtualMemoryPerTask()
++                                  == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT
++        || job.getMaxVirtualMemoryForTask()
++                                  == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
++      LOG.debug("Job " + job.getJobID() + " fits on TT "
++          + taskTracker.trackerName + " Task Type : "
++          + (isMap ? "Map" : "Reduce")
++          + " Reason: One of job or TT has memLimits disabled");
++      return true;
++    }
++
++    // TT enforces memory limits and job specifies its requirements.
++
++    // 1. TT doesn't have enough memory or
++    // 2. TT has enough memory but the job needs more than what TT offers.
++    long freeMemOnTT =
++        (isMap ? taskTracker.getResourceStatus().getFreeVirtualMemoryForMaps()
++           : taskTracker.getResourceStatus().getFreeVirtualMemoryForReduces());
++    if (freeMemOnTT < taskTracker.getResourceStatus()
++        .getDefaultVirtualMemoryPerTask()
++        || job.getMaxVirtualMemoryForTask() > freeMemOnTT) {
++      LOG.info("Job " + job.getJobID() + " doesn't fit on TT "
++          + taskTracker.trackerName + " Task Type : "
++          + (isMap ? "Map" : "Reduce")
++          + " Reason : TT doesn't have enough memory. "
++          + "Or Job needs more than what TT offers");
++      return false;
++    }
++
++    LOG.debug("Job " + job.getJobID() + " fits on TT "
++        + taskTracker.trackerName + " Task Type : "
++        + (isMap ? "Map" : "Reduce"));
++    return true;
++  }
++
+   public JobQueueTaskScheduler() {
+     this.jobQueueJobInProgressListener = new JobQueueJobInProgressListener();
+     this.eagerTaskInitializationListener =
+@@ -73,6 +130,40 @@
+                                  0.01f);
+   }
+ 
++  /**
++   * Update resources' information globally across the cluster.
++   */
++  private synchronized void updateResourcesInformation() {
++    // At present, we update only the maximum job size that can run in the
++    // cluster.
++    Collection<TaskTrackerStatus> taskTrackers =
++        taskTrackerManager.taskTrackers();
++
++    maxVmemForMapTasks = 0;
++    maxVmemForReduceTasks = 0;
++    for (TaskTrackerStatus taskTrackerStatus : taskTrackers) {
++      // We need TaskTracker{Added/Removed} interface, so that this loop is
++      // run when only required.
++      long maxMemPerTaskOnTT =
++          taskTrackerStatus.getResourceStatus()
++              .getDefaultVirtualMemoryPerTask();
++      int maxNumMapTasks = taskTrackerStatus.getMaxMapTasks();
++      int maxNumReduceTasks = taskTrackerStatus.getMaxReduceTasks();
++      long currentMaxVmemForMapTasksOnTT =
++          (maxMemPerTaskOnTT == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT ? Long.MAX_VALUE
++              : maxMemPerTaskOnTT * maxNumMapTasks);
++      long currentMaxVmemForReduceTasksOnTT =
++          (maxMemPerTaskOnTT == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT ? Long.MAX_VALUE
++              : maxMemPerTaskOnTT * maxNumReduceTasks);
++      if (currentMaxVmemForMapTasksOnTT > maxVmemForMapTasks) {
++        maxVmemForMapTasks = currentMaxVmemForMapTasksOnTT;
++      }
++      if (currentMaxVmemForReduceTasksOnTT > maxVmemForReduceTasks) {
++        maxVmemForReduceTasks = currentMaxVmemForReduceTasksOnTT;
++      }
++    }
++  }
++
+   @Override
+   public synchronized List<Task> assignTasks(TaskTrackerStatus taskTracker)
+       throws IOException {
+@@ -83,6 +174,9 @@
+     Collection<JobInProgress> jobQueue =
+       jobQueueJobInProgressListener.getJobQueue();
+ 
++    // update the resources' information.
++    updateResourcesInformation();
++
+     //
+     // Get map + reduce counts for the current tracker.
+     //
+@@ -98,6 +192,20 @@
+     int remainingMapLoad = 0;
+     synchronized (jobQueue) {
+       for (JobInProgress job : jobQueue) {
++
++        // Kill the job if it cannot run in the cluster because of invalid
++        // resource requirements.
++        if (job.getMaxVirtualMemoryForTask() > maxVmemForMapTasks
++            || job.getMaxVirtualMemoryForTask() > maxVmemForReduceTasks) {
++          // 1. This job hasn't started running yet.
++          // 2. This job started running, but all TTs that could run this job
++          // might have gone down.
++          if (!job.isKillInProgress()) {
++            job.kill();
++            continue; // go to the next job.
++          }
++        }
++        
+         if (job.getStatus().getRunState() == JobStatus.RUNNING) {
+           int totalMapTasks = job.desiredMaps();
+           int totalReduceTasks = job.desiredReduces();
+@@ -107,6 +215,9 @@
+       }
+     }
+ 
++    LOG.info("remainingMapLoad in the cluster : " + remainingMapLoad);
++    LOG.info("remainingReduceLoad in the cluster : " + remainingReduceLoad);
++
+     // find out the maximum number of maps or reduces that we are willing
+     // to run on any node.
+     int maxMapLoad = 0;
+@@ -137,7 +248,9 @@
+     // has a workload that's less than the maximum load of that kind of
+     // task.
+     //
+-       
++    LOG.info("numMaps on TT " + taskTracker.trackerName + " : " + numMaps
++        + " current maxMapLoad : " + maxMapLoad);
++    boolean blockCluster = false;
+     if (numMaps < maxMapLoad) {
+ 
+       int totalNeededMaps = 0;
+@@ -147,10 +260,24 @@
+             continue;
+           }
+ 
+-          Task t = job.obtainNewMapTask(taskTracker, numTaskTrackers,
+-              taskTrackerManager.getNumberOfUniqueHosts());
+-          if (t != null) {
+-            return Collections.singletonList(t);
++          if (job.pendingMaps() != 0) {
++            if (jobFitsOnTT(job, taskTracker, true)) {
++              Task t =
++                  job.obtainNewMapTask(taskTracker, numTaskTrackers,
++                      taskTrackerManager.getNumberOfUniqueHosts());
++              if (t != null) {
++                return Collections.singletonList(t);
++              }
++            } else {
++              // block the cluster, till this job's tasks can be scheduled.
++              LOG.info(job.getJobID()
++                  + "'s map tasks don't fit on the TaskTracker "
++                  + taskTracker.trackerName
++                  + ". Returning no task to the taskTracker");
++              blockCluster = true;
++            }
++          } else {
++            LOG.info(job.getJobID() + " doesn't have any tasks to run.");
+           }
+ 
+           //
+@@ -164,7 +291,11 @@
+             padding = Math.min(maxCurrentMapTasks,
+                                (int)(totalNeededMaps * padFraction));
+           }
+-          if (totalMaps + padding >= totalMapTaskCapacity) {
++          if ((totalMaps + padding >= totalMapTaskCapacity)) {
++            break;
++          }
++          if (blockCluster) {
++            blockCluster = false; // look for reduce tasks.
+             break;
+           }
+         }
+@@ -174,6 +305,8 @@
+     //
+     // Same thing, but for reduce tasks
+     //
++    LOG.info("numReduces on TT " + taskTracker.trackerName + " : " + numReduces
++        + " current maxReduceLoad : " + maxReduceLoad);
+     if (numReduces < maxReduceLoad) {
+ 
+       int totalNeededReduces = 0;
+@@ -184,10 +317,24 @@
+             continue;
+           }
+ 
+-          Task t = job.obtainNewReduceTask(taskTracker, numTaskTrackers, 
+-              taskTrackerManager.getNumberOfUniqueHosts());
+-          if (t != null) {
+-            return Collections.singletonList(t);
++          if (job.pendingReduces() != 0) {
++            if (jobFitsOnTT(job, taskTracker, false)) {
++              Task t =
++                  job.obtainNewReduceTask(taskTracker, numTaskTrackers,
++                      taskTrackerManager.getNumberOfUniqueHosts());
++              if (t != null) {
++                return Collections.singletonList(t);
++              }
++            } else {
++              // block the cluster, till this job's tasks can be scheduled.
++              LOG.info(job.getJobID()
++                  + "'s reduce tasks don't fit on the TaskTracker "
++                  + taskTracker.trackerName
++                  + ". Returning no task to the taskTracker");
++              blockCluster = true;
++            }
++          } else {
++            LOG.info(job.getJobID() + " doesn't have any tasks to run.");
+           }
+ 
+           //
+@@ -202,7 +349,8 @@
+               Math.min(maxCurrentReduceTasks,
+                        (int) (totalNeededReduces * padFraction));
+           }
+-          if (totalReduces + padding >= totalReduceTaskCapacity) {
++          if ((totalReduces + padding >= totalReduceTaskCapacity)
++              || blockCluster) {
+             break;
+           }
+         }
+Index: src/mapred/org/apache/hadoop/mapred/TaskTracker.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/TaskTracker.java	(revision 701499)
++++ src/mapred/org/apache/hadoop/mapred/TaskTracker.java	(working copy)
+@@ -1163,12 +1163,19 @@
+     if (askForNewTask) {
+       checkLocalDirs(fConf.getLocalDirs());
+       askForNewTask = enoughFreeSpace(localMinSpaceStart);
+-      status.getResourceStatus().setAvailableSpace( getFreeSpace() );
+-      long freeVirtualMem = findFreeVirtualMemory();
+-      LOG.debug("Setting amount of free virtual memory for the new task: " +
+-                    freeVirtualMem);
+-      status.getResourceStatus().setFreeVirtualMemory(freeVirtualMem);
+-      status.getResourceStatus().setDefaultVirtualMemoryPerTask(getDefaultMemoryPerTask());      
++      status.getResourceStatus().setAvailableSpace(getFreeSpace());
++      long freeVirtualMemForMaps = findFreeVirtualMemory(true);
++      long freeVirtualMemForReduces = findFreeVirtualMemory(false);
++      LOG.debug("Setting amount of free virtual memory for a new map-task: "
++          + freeVirtualMemForMaps);
++      status.getResourceStatus().setFreeVirtualMemoryForMaps(
++          freeVirtualMemForMaps);
++      LOG.debug("Setting amount of free virtual memory for a new reduce-task: "
++          + freeVirtualMemForReduces);
++      status.getResourceStatus().setFreeVirtualMemoryForReduces(
++          freeVirtualMemForReduces);
++      status.getResourceStatus().setDefaultVirtualMemoryPerTask(
++          getDefaultMemoryPerTask());
+     }
+       
+     //
+@@ -1225,19 +1232,18 @@
+   }
+   
+   /**
+-   * Find the minimum amount of virtual memory that would be
+-   * available for a new task.
++   * Find the minimum amount of virtual memory that would be available for a new
++   * task.
+    * 
+-   * The minimum amount of virtual memory is computed by looking
+-   * at the maximum amount of virtual memory that is allowed for
+-   * all tasks in the system, as per mapred.tasktracker.tasks.maxmemory,
+-   * and the total amount of maximum virtual memory that can be
+-   * used by all currently running tasks.
++   * The minimum amount of virtual memory is computed by looking at the maximum
++   * amount of virtual memory that is allowed for all tasks of this type in the
++   * system, as per mapred.tasktracker.tasks.maxmemory, and the total amount of
++   * maximum virtual memory that can be used by all currently running tasks.
+    * 
+-   * @return amount of free virtual memory that can be assured for
+-   * new tasks
++   * @return amount of free virtual memory that can be assured for new tasks of
++   *         type specified by boolean isMap.
+    */
+-  private synchronized long findFreeVirtualMemory() {
++  private synchronized long findFreeVirtualMemory(boolean isMap) {
+   
+     if (maxVirtualMemoryForTasks == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
+       // this will disable picking up tasks based on free memory.
+@@ -1249,13 +1255,22 @@
+       // the following task states are one in which the slot is
+       // still occupied and hence memory of the task should be
+       // accounted in used memory.
+-      if ((tip.getRunState() == TaskStatus.State.RUNNING)
+-            || (tip.getRunState() == TaskStatus.State.COMMIT_PENDING)) {
++      if (((tip.getRunState() == TaskStatus.State.RUNNING)
++            || (tip
++          .getRunState() == TaskStatus.State.COMMIT_PENDING))
++          && (tip.getTask().isMapTask() == isMap)) {
+         maxMemoryUsed += getMemoryForTask(tip.getJobConf());
+       }
+     }
+-  
+-    return (maxVirtualMemoryForTasks - maxMemoryUsed);
++
++    // maxVirtualMemoryForTasks is distributed according to the ratio of slots
++    // between map-tasks and reduce-tasks.
++    long maxTotalSlots = maxCurrentMapTasks + maxCurrentReduceTasks ; 
++    long maxMemForThisTaskType =
++        (isMap ? (maxVirtualMemoryForTasks * maxCurrentMapTasks
++            / maxTotalSlots) : (maxVirtualMemoryForTasks
++            * maxCurrentReduceTasks / maxTotalSlots));
++    return (maxMemForThisTaskType - maxMemoryUsed);
+   }
+ 
+   /**
+@@ -1272,6 +1287,7 @@
+     if (memForTask == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
+       memForTask = this.getDefaultMemoryPerTask();
+     }
++    // TODO: Take care of negative values.
+     return memForTask;
+   }  
+   
+Index: src/mapred/org/apache/hadoop/mapred/TaskTrackerStatus.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/TaskTrackerStatus.java	(revision 701499)
++++ src/mapred/org/apache/hadoop/mapred/TaskTrackerStatus.java	(working copy)
+@@ -54,36 +54,60 @@
+    */
+   static class ResourceStatus implements Writable {
+     
+-    private long freeVirtualMemory;
++    private long freeVirtualMemoryForMaps;
++    private long freeVirtualMemoryForReduces;
+     private long defaultVirtualMemoryPerTask;
+     private long availableSpace;
+     
+     ResourceStatus() {
+-      freeVirtualMemory = JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
++      freeVirtualMemoryForMaps = JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
++      freeVirtualMemoryForReduces = JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
+       defaultVirtualMemoryPerTask = JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
+       availableSpace = Long.MAX_VALUE;
+     }
+     
+     /**
+      * Set the amount of free virtual memory that is available for running
+-     * a new task
++     * a new map-task.
++     * @param freeVMem amount of free virtual memory in kilobytes
++     */
++    void setFreeVirtualMemoryForMaps(long freeVmem) {
++      freeVirtualMemoryForMaps = freeVmem;
++    }
++
++    /**
++     * Get the amount of free virtual memory that will be available for
++     * running a new map-task. 
++     * 
++     * If this is {@link JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT}, it should 
++     * be ignored and not used in computation.
++     * 
++     *@return amount of free virtual memory in kilobytes.
++     */
++    long getFreeVirtualMemoryForMaps() {
++      return freeVirtualMemoryForMaps;
++    }
++
++    /**
++     * Set the amount of free virtual memory that is available for running
++     * a new reduce-task
+      * @param freeVMem amount of free virtual memory in kilobytes
+      */
+-    void setFreeVirtualMemory(long freeVmem) {
+-      freeVirtualMemory = freeVmem;
++    void setFreeVirtualMemoryForReduces(long freeVmem) {
++      freeVirtualMemoryForReduces = freeVmem;
+     }
+ 
+     /**
+      * Get the amount of free virtual memory that will be available for
+-     * running a new task. 
++     * running a new reduce-task. 
+      * 
+      * If this is {@link JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT}, it should 
+      * be ignored and not used in computation.
+      * 
+      *@return amount of free virtual memory in kilobytes.
+      */
+-    long getFreeVirtualMemory() {
+-      return freeVirtualMemory;
++    long getFreeVirtualMemoryForReduces() {
++      return freeVirtualMemoryForReduces;
+     }
+ 
+     /**
+@@ -121,15 +145,17 @@
+     }
+     
+     public void write(DataOutput out) throws IOException {
+-      WritableUtils.writeVLong(out, freeVirtualMemory);
++      WritableUtils.writeVLong(out, freeVirtualMemoryForMaps);
++      WritableUtils.writeVLong(out, freeVirtualMemoryForReduces);
+       WritableUtils.writeVLong(out, defaultVirtualMemoryPerTask);
+       WritableUtils.writeVLong(out, availableSpace);
+     }
+     
+     public void readFields(DataInput in) throws IOException {
+-      freeVirtualMemory = WritableUtils.readVLong(in);;
+-      defaultVirtualMemoryPerTask = WritableUtils.readVLong(in);;
+-      availableSpace = WritableUtils.readVLong(in);;
++      freeVirtualMemoryForMaps = WritableUtils.readVLong(in);
++      freeVirtualMemoryForReduces = WritableUtils.readVLong(in);
++      defaultVirtualMemoryPerTask = WritableUtils.readVLong(in);
++      availableSpace = WritableUtils.readVLong(in);
+     }
+   }
+   
+Index: src/test/org/apache/hadoop/mapred/TestHighRAMJobs.java
+===================================================================
+--- src/test/org/apache/hadoop/mapred/TestHighRAMJobs.java	(revision 701499)
++++ src/test/org/apache/hadoop/mapred/TestHighRAMJobs.java	(working copy)
+@@ -38,18 +38,17 @@
+  * {@link org.apache.hadoop.mapred.TaskScheduler}. This scheduler validates 
+  * the memory related configuration is correctly computed and reported from 
+  * the tasktracker in 
+- * {@link org.apache.hadoop.mapred.TaskScheduler.assignTasks()}.
++ * {@link org.apache.hadoop.mapred.TaskScheduler#assignTasks(TaskTrackerStatus)}.
+  *  
+  */
+ public class TestHighRAMJobs extends TestCase {
+ 
+-  private static final Log LOG = LogFactory.getLog(TestHighRAMJobs.class);
++  static final Log LOG = LogFactory.getLog(TestHighRAMJobs.class);
+ 
+   private static final String DEFAULT_SLEEP_JOB_MAP_COUNT = "1";
+   private static final String DEFAULT_SLEEP_JOB_REDUCE_COUNT = "1";
+   private static final String DEFAULT_MAP_SLEEP_TIME = "1000";
+   private static final String DEFAULT_REDUCE_SLEEP_TIME = "1000";
+-  private static final long DISABLED_VIRTUAL_MEMORY_LIMIT = -1L;
+   
+   private MiniDFSCluster miniDFSCluster;
+   private MiniMRCluster miniMRCluster;
+@@ -58,7 +57,7 @@
+     
+     private boolean hasPassed = true;
+     private String message;
+-    private boolean isFirstTime = true;
++    private boolean isFirstTime = true; // Only one TT throughout the test-case.
+     
+     public FakeTaskScheduler() {
+       super();
+@@ -75,46 +74,96 @@
+     @Override
+     public List<Task> assignTasks(TaskTrackerStatus status) 
+                                           throws IOException {
+-      TestHighRAMJobs.LOG.info("status = " + status.getResourceStatus().getFreeVirtualMemory());
++      long freeMemoryForMaps =
++          status.getResourceStatus().getFreeVirtualMemoryForMaps();
++      long freeMemoryForReduces =
++          status.getResourceStatus().getFreeVirtualMemoryForReduces();
+ 
+       long initialFreeMemory = getConf().getLong("initialFreeMemory", 0L);
+       long memoryPerTaskOnTT = getConf().getLong("memoryPerTaskOnTT", 0L);
++      long defaultMemoryPerTaskOnTT =
++          status.getResourceStatus().getDefaultVirtualMemoryPerTask();
++      long maxMapTasks = status.getMaxMapTasks();
++      long maxReduceTasks = status.getMaxReduceTasks();
++      long maxTotalTasks = maxMapTasks + maxReduceTasks;
++
++      TestHighRAMJobs.LOG.info("freeMemoryForMaps = " + freeMemoryForMaps);
++      TestHighRAMJobs.LOG
++          .info("freeMemoryForReduces = " + freeMemoryForReduces);
+ 
+       if (isFirstTime) {
+         isFirstTime = false;
+-        if (initialFreeMemory != status.getResourceStatus().getFreeVirtualMemory()) {
++
++        // Verify free memory.
++        long expectedFreeMemoryForMaps =
++            (initialFreeMemory == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT ? initialFreeMemory
++                : initialFreeMemory * maxMapTasks / maxTotalTasks);
++        long expectedFreeMemoryForReduces =
++            (initialFreeMemory == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT ? initialFreeMemory
++                : initialFreeMemory * maxReduceTasks / maxTotalTasks);
++
++        if (freeMemoryForMaps != expectedFreeMemoryForMaps) {
+           hasPassed = false;
+-          message = "Initial memory expected = " + initialFreeMemory
+-                      + " reported = " + status.getResourceStatus().getFreeVirtualMemory();
++          message =
++              "Initial memory for maps expected = " + expectedFreeMemoryForMaps
++                  + " reported = " + freeMemoryForMaps;
++          LOG.warn(message);
+         }
+-        if (memoryPerTaskOnTT != status.getResourceStatus().getDefaultVirtualMemoryPerTask()) {
++        if (freeMemoryForReduces != expectedFreeMemoryForReduces) {
+           hasPassed = false;
+-          message = "Memory per task on TT expected = " + memoryPerTaskOnTT
+-                      + " reported = " 
+-                      + status.getResourceStatus().getDefaultVirtualMemoryPerTask();
++          message =
++              "Initial memory for reduces expected = "
++                  + expectedFreeMemoryForReduces + " reported = "
++                  + freeMemoryForReduces;
++          LOG.warn(message);
+         }
+-      } else if (initialFreeMemory != DISABLED_VIRTUAL_MEMORY_LIMIT) {
+-        
++
++        // Verify default memory per task on TT.
++        if (memoryPerTaskOnTT != defaultMemoryPerTaskOnTT) {
++          hasPassed = false;
++          message =
++              "Memory per task on TT expected = " + memoryPerTaskOnTT
++                  + " reported = " + defaultMemoryPerTaskOnTT;
++          LOG.warn(message);
++        }
++      } else if (initialFreeMemory != JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
++
+         long memoryPerTask = memoryPerTaskOnTT; // by default
+-        if (getConf().getLong("memoryPerTask", 0L) != 
+-                                            DISABLED_VIRTUAL_MEMORY_LIMIT) {
++        if (getConf().getLong("memoryPerTask", 0L) != JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
++          // The job has specified memory requirements.
+           memoryPerTask = getConf().getLong("memoryPerTask", 0L);
+         }
+-          
+-        long expectedFreeMemory = 0;
+-        int runningTaskCount = status.countMapTasks() +
+-                              status.countReduceTasks();
+-        expectedFreeMemory = initialFreeMemory - 
+-                                (memoryPerTask * runningTaskCount);
++
++        int runningMapTaskCount = status.countMapTasks();
++        int runningReduceTaskCount = status.countReduceTasks();
++        long expectedFreeMemoryForMaps =
++            initialFreeMemory * maxMapTasks / maxTotalTasks
++                - (memoryPerTask * runningMapTaskCount);
++        long expectedFreeMemoryForReduces =
++            initialFreeMemory * maxReduceTasks / maxTotalTasks
++                - (memoryPerTask * runningReduceTaskCount);
+ 
+-        TestHighRAMJobs.LOG.info("expected free memory = " + 
+-                                  expectedFreeMemory + ", reported = " + 
+-                                  status.getResourceStatus().getFreeVirtualMemory());
+-        if (expectedFreeMemory != status.getResourceStatus().getFreeVirtualMemory()) {
++        TestHighRAMJobs.LOG.info("expected free memory for maps = "
++            + expectedFreeMemoryForMaps + ", reported = " + freeMemoryForMaps);
++        TestHighRAMJobs.LOG.info("expected free memory for reduces = "
++            + expectedFreeMemoryForReduces + ", reported = "
++            + freeMemoryForReduces);
++        if (expectedFreeMemoryForMaps != freeMemoryForMaps) {
++          hasPassed = false;
++          message =
++              "Expected free memory for maps after " + runningMapTaskCount
++                  + " map tasks are scheduled = " + expectedFreeMemoryForMaps
++                  + ", reported = " + freeMemoryForMaps;
++          LOG.warn(message);
++        }
++        if (expectedFreeMemoryForReduces != freeMemoryForReduces) {
+           hasPassed = false;
+-          message = "Expected free memory after " + runningTaskCount
+-                      + " tasks are scheduled = " + expectedFreeMemory
+-                      + ", reported = " + status.getResourceStatus().getFreeVirtualMemory();
++          message =
++              "Expected free memory for reduces after "
++                  + runningReduceTaskCount + " reduce tasks are scheduled = "
++                  + expectedFreeMemoryForReduces + ", reported = "
++                  + freeMemoryForReduces;
++          LOG.warn(message);
+         }
+       }
+       return super.assignTasks(status);
+@@ -125,10 +174,9 @@
+    * correctly.
+    */
+   public void testDefaultValuesForHighRAMJobs() throws Exception {
+-    long defaultMemoryLimit = DISABLED_VIRTUAL_MEMORY_LIMIT;
++    long defaultMemoryLimit = JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
+     try {
+-      setUpCluster(defaultMemoryLimit, defaultMemoryLimit, 
+-                    defaultMemoryLimit, null);
++      setUpCluster(defaultMemoryLimit, defaultMemoryLimit, null);
+       runJob(defaultMemoryLimit, DEFAULT_MAP_SLEEP_TIME, 
+           DEFAULT_REDUCE_SLEEP_TIME, DEFAULT_SLEEP_JOB_MAP_COUNT, 
+           DEFAULT_SLEEP_JOB_REDUCE_COUNT);
+@@ -144,14 +192,12 @@
+   public void testDefaultMemoryPerTask() throws Exception {
+     long maxVmem = 1024*1024*1024L;
+     JobConf conf = new JobConf();
++    // change number of slots to 2.
+     conf.setInt("mapred.tasktracker.map.tasks.maximum", 1);
+     conf.setInt("mapred.tasktracker.reduce.tasks.maximum", 1);
+-    // change number of slots to 2.
+-    long defaultMemPerTaskOnTT = maxVmem / 2;
+     try {
+-      setUpCluster(maxVmem, defaultMemPerTaskOnTT, 
+-                    DISABLED_VIRTUAL_MEMORY_LIMIT, conf);
+-      runJob(DISABLED_VIRTUAL_MEMORY_LIMIT, DEFAULT_MAP_SLEEP_TIME,
++      setUpCluster(maxVmem, JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT, conf);
++      runJob(JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT, DEFAULT_MAP_SLEEP_TIME,
+               DEFAULT_REDUCE_SLEEP_TIME, DEFAULT_SLEEP_JOB_MAP_COUNT,
+               DEFAULT_SLEEP_JOB_REDUCE_COUNT);
+       verifyTestResults();
+@@ -167,11 +213,9 @@
+    */
+   public void testConfiguredValueForFreeMemory() throws Exception {
+     long maxVmem = 1024*1024*1024L;
+-    long defaultMemPerTaskOnTT = maxVmem/4; // 4 = default number of slots.
+     try {
+-      setUpCluster(maxVmem, defaultMemPerTaskOnTT,
+-                    DISABLED_VIRTUAL_MEMORY_LIMIT, null);
+-      runJob(DISABLED_VIRTUAL_MEMORY_LIMIT, "10000",
++      setUpCluster(maxVmem, JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT, null);
++      runJob(JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT, "10000",
+               DEFAULT_REDUCE_SLEEP_TIME, DEFAULT_SLEEP_JOB_MAP_COUNT,
+               DEFAULT_SLEEP_JOB_REDUCE_COUNT);
+       verifyTestResults();
+@@ -182,15 +226,13 @@
+   
+   public void testHighRAMJob() throws Exception {
+     long maxVmem = 1024*1024*1024L;
+-    long defaultMemPerTaskOnTT = maxVmem/4; // 4 = default number of slots.
+     /* Set a HIGH RAM requirement for a job. As 4 is the
+      * default number of slots, we set up the memory limit
+      * per task to be more than 25%. 
+      */
+     long maxVmemPerTask = maxVmem/3;
+     try {
+-      setUpCluster(maxVmem, defaultMemPerTaskOnTT,
+-                    maxVmemPerTask, null);
++      setUpCluster(maxVmem, maxVmemPerTask, null);
+       /* set up sleep limits higher, so the scheduler will see varying
+        * number of running tasks at a time. Also modify the number of
+        * map tasks so we test the iteration over more than one task.
+@@ -203,26 +245,31 @@
+     }
+   }
+   
+-  private void setUpCluster(long initialFreeMemory, long memoryPerTaskOnTT,
+-                            long memoryPerTask, JobConf conf) 
+-                              throws Exception {
++  private void setUpCluster(long initialFreeMemory, long memoryPerTask,
++      JobConf conf)
++      throws Exception {
+     if (conf == null) {
+       conf = new JobConf();
+     }
+-    conf.setClass("mapred.jobtracker.taskScheduler", 
+-        TestHighRAMJobs.FakeTaskScheduler.class,
+-        TaskScheduler.class);
+-    if (initialFreeMemory != -1L) {
+-      conf.setMaxVirtualMemoryForTasks(initialFreeMemory);  
+-    }
++    conf.setClass("mapred.jobtracker.taskScheduler",
++        TestHighRAMJobs.FakeTaskScheduler.class, TaskScheduler.class);
++    conf.setMaxVirtualMemoryForTasks(initialFreeMemory);
++
+     conf.setLong("initialFreeMemory", initialFreeMemory);
+-    conf.setLong("memoryPerTaskOnTT", memoryPerTaskOnTT);
++    int maxMapTasks = conf.getInt(
++        "mapred.tasktracker.map.tasks.maximum", 2);
++    int maxReduceTasks = conf.getInt(
++        "mapred.tasktracker.reduce.tasks.maximum", 2);
++    long maxTotalTasks = maxMapTasks + maxReduceTasks;
++    conf.setLong("memoryPerTaskOnTT",
++            (initialFreeMemory == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT
++                ? initialFreeMemory
++                : (initialFreeMemory / maxTotalTasks)));
+     conf.setLong("memoryPerTask", memoryPerTask);
+     miniDFSCluster = new MiniDFSCluster(conf, 1, true, null);
+     FileSystem fileSys = miniDFSCluster.getFileSystem();
+     String namenode = fileSys.getUri().toString();
+-    miniMRCluster = new MiniMRCluster(1, namenode, 3, 
+-                      null, null, conf);    
++    miniMRCluster = new MiniMRCluster(1, namenode, 3, null, null, conf);
+   }
+   
+   private void runJob(long memoryPerTask, String mapSleepTime,
+Index: src/test/org/apache/hadoop/mapred/TestJobQueueTaskScheduler.java
+===================================================================
+--- src/test/org/apache/hadoop/mapred/TestJobQueueTaskScheduler.java	(revision 701499)
++++ src/test/org/apache/hadoop/mapred/TestJobQueueTaskScheduler.java	(working copy)
+@@ -26,10 +26,15 @@
+ 
+ import junit.framework.TestCase;
+ 
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.io.BytesWritable;
+ 
+ public class TestJobQueueTaskScheduler extends TestCase {
+-  
++
++  static final Log LOG =
++      LogFactory.getLog(TestJobQueueTaskScheduler.class);
++
+   private static int jobCounter;
+   private static int taskCounter;
+   
+@@ -40,6 +45,7 @@
+     public FakeJobInProgress(JobConf jobConf,
+         FakeTaskTrackerManager taskTrackerManager) throws IOException {
+       super(new JobID("test", ++jobCounter), jobConf);
++      super.setMaxVirtualMemoryForTask(jobConf.getMaxVirtualMemoryForTask());
+       this.taskTrackerManager = taskTrackerManager;
+       this.startTime = System.currentTimeMillis();
+       this.status = new JobStatus();
+@@ -61,7 +67,8 @@
+           return String.format("%s on %s", getTaskID(), tts.getTrackerName());
+         }
+       };
+-      taskTrackerManager.update(tts.getTrackerName(), task);
++      task.setConf(this.getJobConf());
++      taskTrackerManager.markTaskAsRunning(tts.getTrackerName(), task);
+       runningMapTasks++;
+       return task;
+     }
+@@ -76,7 +83,8 @@
+           return String.format("%s on %s", getTaskID(), tts.getTrackerName());
+         }
+       };
+-      taskTrackerManager.update(tts.getTrackerName(), task);
++      task.setConf(this.getJobConf());
++      taskTrackerManager.markTaskAsRunning(tts.getTrackerName(), task);
+       runningReduceTasks++;
+       return task;
+     }
+@@ -86,8 +94,18 @@
+       return new TaskAttemptID(jobId.getJtIdentifier(),
+           jobId.getId(), isMap, ++taskCounter, 0);
+     }
++
++    private void mapTaskFinished() {
++      runningMapTasks--;
++      finishedMapTasks++;
++    }
++    
++    private void reduceTaskFinished() {
++      runningReduceTasks--;
++      finishedReduceTasks++;
++    }
+   }
+-  
++
+   static class FakeTaskTrackerManager implements TaskTrackerManager {
+     
+     int maps = 0;
+@@ -100,16 +118,23 @@
+     
+     private Map<String, TaskTrackerStatus> trackers =
+       new HashMap<String, TaskTrackerStatus>();
++    private Map<String, Map<String,TaskStatus>> taskStatuses = 
++      new HashMap<String, Map<String,TaskStatus>>();
++    private Map<JobID, Long> jobIDToVmem = new HashMap<JobID, Long>();
+ 
+-    public FakeTaskTrackerManager() {
++    public FakeTaskTrackerManager(int numTaskTrackers,
++        int maxMapTasksPerTracker, int maxReduceTasksPerTracker) {
++      this.maxMapTasksPerTracker = maxMapTasksPerTracker;
++      this.maxReduceTasksPerTracker = maxReduceTasksPerTracker;
+       JobConf conf = new JobConf();
+       queueManager = new QueueManager(conf);
+-      trackers.put("tt1", new TaskTrackerStatus("tt1", "tt1.host", 1,
+-          new ArrayList<TaskStatus>(), 0,
+-          maxMapTasksPerTracker, maxReduceTasksPerTracker));
+-      trackers.put("tt2", new TaskTrackerStatus("tt2", "tt2.host", 2,
+-          new ArrayList<TaskStatus>(), 0,
+-          maxMapTasksPerTracker, maxReduceTasksPerTracker));
++      for (int i = 1; i < numTaskTrackers + 1; i++) {
++        String ttName = "tt" + i;
++        trackers.put(ttName, new TaskTrackerStatus(ttName, ttName + ".host", i,
++            new ArrayList<TaskStatus>(), 0, maxMapTasksPerTracker,
++            maxReduceTasksPerTracker));
++        taskStatuses.put(ttName, new HashMap<String,TaskStatus>());
++      }
+     }
+     
+     @Override
+@@ -131,6 +156,9 @@
+       return trackers.values();
+     }
+ 
++    public void removeTaskTracker(String ttName) {
++      trackers.remove(ttName);
++    }
+ 
+     @Override
+     public void addJobInProgressListener(JobInProgressListener listener) {
+@@ -164,7 +192,7 @@
+       return trackers.get(trackerID);
+     }
+     
+-    public void update(String taskTrackerName, final Task t) {
++    public void markTaskAsRunning(String taskTrackerName, final Task t) {
+       if (t.isMapTask()) {
+         maps++;
+       } else {
+@@ -172,36 +200,103 @@
+       }
+       TaskStatus status = new TaskStatus() {
+         @Override
++        public TaskAttemptID getTaskID() {
++          return t.getTaskID();
++        }
++
++        @Override
+         public boolean getIsMap() {
+-          return t.isMapTask();
++         return t.isMapTask();
+         }
+       };
+       status.setRunState(TaskStatus.State.RUNNING);
++      long taskMemory = ((JobConf) t.getConf()).getMaxVirtualMemoryForTask();
++      long taskTrackerMemoryPerSlot =
++          trackers.get(taskTrackerName).getResourceStatus()
++              .getDefaultVirtualMemoryPerTask();
++      if (taskMemory == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
++        taskMemory = taskTrackerMemoryPerSlot;
++      }
++      if (!jobIDToVmem.containsKey(t.getTaskID().getJobID())) {
++        LOG.info(" Job memory for " + t.getTaskID().getJobID() + " : " + taskMemory);
++        jobIDToVmem.put(t.getTaskID().getJobID(), Long.valueOf(taskMemory));
++      }
++      taskStatuses.get(taskTrackerName).put(t.getTaskID().toString(), status);
+       trackers.get(taskTrackerName).getTaskReports().add(status);
+     }
+-    
++
++    public void markTaskAsFinished(String taskTrackerName, String tipId, 
++        FakeJobInProgress j) {
++      TaskStatus status = taskStatuses.get(taskTrackerName).get(tipId);
++      if (status.getIsMap()) {
++        maps--;
++        j.mapTaskFinished();
++      } else {
++        reduces--;
++        j.reduceTaskFinished();
++      }
++      status.setRunState(TaskStatus.State.SUCCEEDED);
++    }
++
++    public void updateFreeMemoryOnTT(String trackerID) {
++      TaskTrackerStatus tt = trackers.get(trackerID);
++      if (tt.getResourceStatus().getDefaultVirtualMemoryPerTask() ==
++                                    JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
++        return;
++      }
++
++      long freeMemoryOnTTForMaps =
++          tt.getResourceStatus().getDefaultVirtualMemoryPerTask()
++              * tt.getMaxMapTasks();
++      long freeMemoryOnTTForReduces =
++          tt.getResourceStatus().getDefaultVirtualMemoryPerTask()
++              * tt.getMaxReduceTasks();
++      Map<String, TaskStatus> tasksOnTT = taskStatuses.get(trackerID);
++      for (TaskStatus taskStatus : tasksOnTT.values()) {
++        if (taskStatus.getRunState() == TaskStatus.State.RUNNING) {
++          LOG.info(taskStatus.getTaskID().getJobID());
++          if (taskStatus.getIsMap()) {
++            freeMemoryOnTTForMaps -=
++                jobIDToVmem.get(taskStatus.getTaskID().getJobID()).longValue();
++          } else {
++            freeMemoryOnTTForReduces -=
++                jobIDToVmem.get(taskStatus.getTaskID().getJobID()).longValue();
++          }
++        }
++      }
++      tt.getResourceStatus().setFreeVirtualMemoryForMaps(freeMemoryOnTTForMaps);
++      LOG.info("Free Memory for maps on " + trackerID + " : " + freeMemoryOnTTForMaps);
++      tt.getResourceStatus().setFreeVirtualMemoryForReduces(
++          freeMemoryOnTTForReduces);
++      LOG.info("Free Memory for reduces on " + trackerID + " : "
++          + freeMemoryOnTTForReduces);
++    }
+   }
+   
+-  protected JobConf jobConf;
+   protected TaskScheduler scheduler;
+   private FakeTaskTrackerManager taskTrackerManager;
+ 
+   @Override
+-  protected void setUp() throws Exception {
++  protected void setUp() throws IOException {
++    setUp(2, 2, 2);
++  }
++
++  private void setUp(int numTaskTrackers, int numMapTasksPerTracker,
++      int numReduceTasksPerTracker)
++      throws IOException {
+     jobCounter = 0;
+     taskCounter = 0;
+-    jobConf = new JobConf();
+-    jobConf.setNumMapTasks(10);
+-    jobConf.setNumReduceTasks(10);
+-    taskTrackerManager = new FakeTaskTrackerManager();
++    taskTrackerManager =
++        new FakeTaskTrackerManager(numTaskTrackers, numMapTasksPerTracker,
++            numReduceTasksPerTracker);
+     scheduler = createTaskScheduler();
+-    scheduler.setConf(jobConf);
++    scheduler.setConf(new JobConf());
+     scheduler.setTaskTrackerManager(taskTrackerManager);
+     scheduler.start();
+   }
+-  
++
+   @Override
+-  protected void tearDown() throws Exception {
++  protected void tearDown() throws IOException {
+     if (scheduler != null) {
+       scheduler.terminate();
+     }
+@@ -210,16 +305,33 @@
+   protected TaskScheduler createTaskScheduler() {
+     return new JobQueueTaskScheduler();
+   }
+-  
+-  protected void submitJobs(int number, int state)
++
++  protected void submitJobs(int number, int state) throws IOException {
++    submitJobs(number, state, null);
++  }
++
++  private void submitJobs(int number, int state, JobConf jobConf)
+     throws IOException {
++
++    if (jobConf == null) {
++      jobConf = new JobConf();
++      jobConf.setNumMapTasks(10);
++      jobConf.setNumReduceTasks(10);
++    }
++
+     for (int i = 0; i < number; i++) {
+-      JobInProgress job = new FakeJobInProgress(jobConf, taskTrackerManager);
+-      job.getStatus().setRunState(state);
+-      taskTrackerManager.submitJob(job);
++      submitJob(state, jobConf);
+     }
+   }
+ 
++  protected FakeJobInProgress submitJob(int state, JobConf jobConf)
++      throws IOException {
++    FakeJobInProgress job = new FakeJobInProgress(jobConf, taskTrackerManager);
++    job.getStatus().setRunState(state);
++    taskTrackerManager.submitJob(job);
++    return job;
++  }
++
+   public void testTaskNotAssignedWhenNoJobsArePresent() throws IOException {
+     assertNull(scheduler.assignTasks(tracker("tt1")));
+   }
+@@ -246,6 +358,127 @@
+     checkAssignment("tt2", "attempt_test_0001_r_000008_0 on tt2");
+   }
+ 
++  public void testTaskLoadsOnTTs() throws Exception {
++    tearDown();
++    setUp(2, 4, 4);
++    JobConf jobConf = new JobConf();
++    jobConf.setNumMapTasks(6);
++    jobConf.setNumReduceTasks(0);
++    submitJobs(1, JobStatus.RUNNING, jobConf);
++    checkAssignment("tt1", "attempt_test_0001_m_000001_0 on tt1");
++    checkAssignment("tt1", "attempt_test_0001_m_000002_0 on tt1");
++    checkAssignment("tt1", "attempt_test_0001_m_000003_0 on tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1"))); // Not to tt1 anymore.
++    checkAssignment("tt2", "attempt_test_0001_m_000004_0 on tt2");
++    checkAssignment("tt2", "attempt_test_0001_m_000005_0 on tt2");
++    checkAssignment("tt2", "attempt_test_0001_m_000006_0 on tt2");
++    assertNull(scheduler.assignTasks(tracker("tt2"))); // Not to tt2 anymore.
++  }
++
++  /**
++   * Test HighRAM jobs.
++   * @throws Exception
++   */
++  public void testHighRAMJobs()
++      throws Exception {
++    tearDown(); // shut down the scheduler started during setup.
++
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(2, 2, 2);
++    LOG.debug("Setting 1GB memory per slot on TT");
++    taskTrackerManager.getTaskTracker("tt1").getResourceStatus()
++        .setDefaultVirtualMemoryPerTask(1024 * 1024 * 1024L);
++    taskTrackerManager.getTaskTracker("tt2").getResourceStatus()
++        .setDefaultVirtualMemoryPerTask(1024 * 1024 * 1024L);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    scheduler.start();
++
++    LOG.debug("Submit one high ram(1.5BG) job of 3 map tasks.");
++    JobConf jConf = new JobConf();
++    jConf.setMaxVirtualMemoryForTask(1536 * 1024 * 1024L); // 1.5GB job
++    jConf.setNumMapTasks(3);
++    jConf.setNumReduceTasks(0);
++    FakeJobInProgress job1 = submitJob(JobStatus.RUNNING, jConf);
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    checkAssignment("tt1", "attempt_test_0001_m_000001_0 on tt1");
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt2", "attempt_test_0001_m_000002_0 on tt2");
++
++    // No more tasks of this high ram jobs can run on any of the TTs
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    assertNull(scheduler.assignTasks(tracker("tt2")));
++
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1"))); // still nothing
++    // Let attempt_test_0001_m_000002_0 finish, task assignment should succeed.
++    taskTrackerManager.markTaskAsFinished("tt2",
++        "attempt_test_0001_m_000002_0", job1);
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    // TT2 should run task now.
++    checkAssignment("tt2", "attempt_test_0001_m_000003_0 on tt2");
++
++    LOG.debug("Submit normal(1GB) job of 2 map and 2 reduce tasks.");
++    jConf.setMaxVirtualMemoryForTask(1024 * 1024 * 1024L); // 1GB job
++    jConf.setNumMapTasks(2);
++    jConf.setNumReduceTasks(2);
++    submitJob(JobStatus.RUNNING, jConf);
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    // taskCounter is global in this testcase. So next reducer would be
++    // r_0000004
++    checkAssignment("tt1", "attempt_test_0002_r_000004_0 on tt1");
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt2", "attempt_test_0002_r_000005_0 on tt2");
++
++    // Finish High-ram job and run the smaller one
++    taskTrackerManager.markTaskAsFinished("tt1",
++        "attempt_test_0001_m_000001_0", job1);
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    checkAssignment("tt1", "attempt_test_0002_m_000006_0 on tt1");
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt1", "attempt_test_0002_m_000007_0 on tt1");
++  }
++
++  /**
++   * test highRAMJob that becomes invalid after submission. This occurs if all
++   * TTs running this job go down and not alive TT can run this job.
++   * 
++   * @throws IOException
++   */
++  public void testHighRAMJobThatBecomesInvalid()
++      throws IOException {
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(2, 2, 2);
++    taskTrackerManager.getTaskTracker("tt1").getResourceStatus()
++        .setDefaultVirtualMemoryPerTask(1024 * 1024 * 1024L);
++    taskTrackerManager.getTaskTracker("tt2").getResourceStatus()
++        .setDefaultVirtualMemoryPerTask(2048 * 1024 * 1024L);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    scheduler.start();
++
++    LOG.debug("Submit one invalid high ram(5GB) job of 1 map, 0 reduce tasks.");
++    JobConf jConf = new JobConf();
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(0);
++    jConf.setMaxVirtualMemoryForTask(3072 * 1024 * 1024L); // 3 GB
++    FakeJobInProgress job1 = submitJob(JobStatus.RUNNING, jConf);
++    // TT1 cannot run this job.
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++    // TT2 can run this job.
++    taskTrackerManager.updateFreeMemoryOnTT("tt2");
++    checkAssignment("tt2", "attempt_test_0001_m_000001_0 on tt2");
++    // TT2 has gone down.
++    taskTrackerManager.removeTaskTracker("tt2");
++    // Heartbeat of TT1 triggers job-kill.
++    taskTrackerManager.updateFreeMemoryOnTT("tt1");
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++
++    // Job should be killed because no TT can run it now.
++    assertTrue(job1.isKillInProgress());
++  }
++
+   protected TaskTrackerStatus tracker(String taskTrackerName) {
+     return taskTrackerManager.getTaskTracker(taskTrackerName);
+   }
+Index: src/test/org/apache/hadoop/mapred/TestLimitTasksPerJobTaskScheduler.java
+===================================================================
+--- src/test/org/apache/hadoop/mapred/TestLimitTasksPerJobTaskScheduler.java	(revision 701499)
++++ src/test/org/apache/hadoop/mapred/TestLimitTasksPerJobTaskScheduler.java	(working copy)
+@@ -27,6 +27,7 @@
+   }
+ 
+   public void testMaxRunningTasksPerJob() throws IOException {
++    JobConf jobConf = new JobConf();
+     jobConf.setLong(LimitTasksPerJobTaskScheduler.MAX_TASKS_PER_JOB_PROPERTY,
+         4L);
+     scheduler.setConf(jobConf);
+@@ -45,6 +46,7 @@
+   
+   public void testMaxRunningTasksPerJobWithInterleavedTrackers()
+       throws IOException {
++    JobConf jobConf = new JobConf();
+     jobConf.setLong(LimitTasksPerJobTaskScheduler.MAX_TASKS_PER_JOB_PROPERTY,
+         4L);
+     scheduler.setConf(jobConf);
+@@ -61,5 +63,14 @@
+     checkAssignment("tt2", "attempt_test_0002_r_000007_0 on tt2");
+     checkAssignment("tt2", "attempt_test_0002_r_000008_0 on tt2");
+   }
+-  
++
++  @Override
++  public void testHighRAMJobThatBecomesInvalid() {
++    // No highRAMJobs support for this scheduler.
++  }
++
++  @Override
++  public void testHighRAMJobs() {
++    // No highRAMJobs support for this scheduler.
++  }
+ }

@@ -1,0 +1,2745 @@
+Index: src/test/org/apache/hadoop/mapred/TestJobQueueTaskScheduler.java
+===================================================================
+--- src/test/org/apache/hadoop/mapred/TestJobQueueTaskScheduler.java	(revision 720747)
++++ src/test/org/apache/hadoop/mapred/TestJobQueueTaskScheduler.java	(working copy)
+@@ -152,7 +152,17 @@
+     public int getNextHeartbeatInterval() {
+       return MRConstants.HEARTBEAT_INTERVAL_MIN;
+     }
+-    
++
++    @Override
++    public void killJob(JobID jobid) {
++      return;
++    }
++
++    @Override
++    public JobInProgress getJob(JobID jobid) {
++      return null;
++    }
++
+     // Test methods
+     
+     public void submitJob(JobInProgress job) {
+Index: src/test/org/apache/hadoop/mapred/TestTTMemoryReporting.java
+===================================================================
+--- src/test/org/apache/hadoop/mapred/TestTTMemoryReporting.java	(revision 0)
++++ src/test/org/apache/hadoop/mapred/TestTTMemoryReporting.java	(revision 0)
+@@ -0,0 +1,240 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.mapred;
++
++import java.io.IOException;
++import java.util.List;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.examples.SleepJob;
++import org.apache.hadoop.fs.FileSystem;
++import org.apache.hadoop.hdfs.MiniDFSCluster;
++import org.apache.hadoop.util.DummyMemoryCalculatorPlugin;
++import org.apache.hadoop.util.LinuxMemoryCalculatorPlugin;
++import org.apache.hadoop.util.ToolRunner;
++
++import junit.framework.TestCase;
++
++/**
++ * This test class tests the functionality related to configuring, reporting
++ * and computing memory related parameters in a Map/Reduce cluster.
++ * 
++ * Each test sets up a {@link MiniMRCluster} with a locally defined 
++ * {@link org.apache.hadoop.mapred.TaskScheduler}. This scheduler validates 
++ * the memory related configuration is correctly computed and reported from 
++ * the tasktracker in 
++ * {@link org.apache.hadoop.mapred.TaskScheduler#assignTasks(TaskTrackerStatus)}.
++ */
++public class TestTTMemoryReporting extends TestCase {
++
++  static final Log LOG = LogFactory.getLog(TestTTMemoryReporting.class);
++  
++  private MiniDFSCluster miniDFSCluster;
++  private MiniMRCluster miniMRCluster;
++
++  /**
++   * Fake scheduler to test the proper reporting of memory values by TT
++   */
++  public static class FakeTaskScheduler extends JobQueueTaskScheduler {
++    
++    private boolean hasPassed = true;
++    private String message;
++    
++    public FakeTaskScheduler() {
++      super();
++    }
++    
++    public boolean hasTestPassed() {
++      return hasPassed;
++    }
++    
++    public String getFailureMessage() {
++      return message;
++    }
++    
++    @Override
++    public List<Task> assignTasks(TaskTrackerStatus status)
++        throws IOException {
++
++      long totalVirtualMemoryOnTT =
++          getConf().getLong("totalVmemOnTT", JobConf.DISABLED_MEMORY_LIMIT);
++      long totalPhysicalMemoryOnTT =
++          getConf().getLong("totalPmemOnTT", JobConf.DISABLED_MEMORY_LIMIT);
++      long virtualMemoryReservedOnTT =
++          getConf().getLong("reservedVmemOnTT", JobConf.DISABLED_MEMORY_LIMIT);
++      long physicalMemoryReservedOnTT =
++          getConf().getLong("reservedPmemOnTT", JobConf.DISABLED_MEMORY_LIMIT);
++
++      long reportedTotalVirtualMemoryOnTT =
++          status.getResourceStatus().getTotalVirtualMemory();
++      long reportedTotalPhysicalMemoryOnTT =
++          status.getResourceStatus().getTotalPhysicalMemory();
++      long reportedVirtualMemoryReservedOnTT =
++          status.getResourceStatus().getReservedTotalMemory();
++      long reportedPhysicalMemoryReservedOnTT =
++          status.getResourceStatus().getReservedPhysicalMemory();
++
++      message =
++          "expected memory values : (totalVirtualMemoryOnTT, totalPhysicalMemoryOnTT, "
++              + "virtualMemoryReservedOnTT, physicalMemoryReservedOnTT) = ("
++              + totalVirtualMemoryOnTT + ", " + totalPhysicalMemoryOnTT + ", "
++              + virtualMemoryReservedOnTT + ", " + physicalMemoryReservedOnTT
++              + ")";
++      message +=
++          "\nreported memory values : (totalVirtualMemoryOnTT, totalPhysicalMemoryOnTT, "
++              + "virtualMemoryReservedOnTT, physicalMemoryReservedOnTT) = ("
++              + reportedTotalVirtualMemoryOnTT
++              + ", "
++              + reportedTotalPhysicalMemoryOnTT
++              + ", "
++              + reportedVirtualMemoryReservedOnTT
++              + ", "
++              + reportedPhysicalMemoryReservedOnTT + ")";
++      LOG.info(message);
++      if (totalVirtualMemoryOnTT != reportedTotalVirtualMemoryOnTT
++          || totalPhysicalMemoryOnTT != reportedTotalPhysicalMemoryOnTT
++          || virtualMemoryReservedOnTT != reportedVirtualMemoryReservedOnTT
++          || physicalMemoryReservedOnTT != reportedPhysicalMemoryReservedOnTT) {
++        hasPassed = false;
++      }
++      return super.assignTasks(status);
++    }
++  }
++
++  /**
++   * Test that verifies default values are configured and reported correctly.
++   * 
++   * @throws Exception
++   */
++  public void testDefaultMemoryValues()
++      throws Exception {
++    JobConf conf = new JobConf();
++    String osName = System.getProperty("os.name");
++    System.setProperty("os.name", "");
++    try {
++      // Memory values are disabled by default.
++      setUpCluster(conf);
++      runSleepJob();
++      verifyTestResults();
++    } finally {
++      System.setProperty("os.name", osName);
++      tearDownCluster();
++    }
++  }
++
++  /**
++   * Test that verifies that configured values are reported correctly.
++   * 
++   * @throws Exception
++   */
++  public void testConfiguredMemoryValues() throws Exception {
++    JobConf conf = new JobConf();
++    String osName = System.getProperty("os.name");
++    conf.setLong("totalVmemOnTT", 4 * 1024 * 1024);
++    conf.setLong("totalPmemOnTT", 2 * 1024 * 1024);
++    conf.setLong("reservedVmemOnTT", 1 * 1024 * 1024);
++    conf.setLong("reservedPmemOnTT", 512 * 1024);
++    conf.setLong(DummyMemoryCalculatorPlugin.MAXVMEM_TESTING_PROPERTY,
++        4 * 1024 * 1024);
++    conf.setLong(DummyMemoryCalculatorPlugin.MAXPMEM_TESTING_PROPERTY,
++        2 * 1024 * 1024);
++    conf.setLong(
++        TaskTracker.MAPRED_TASKTRACKER_VIRTUALMEMORY_RESERVED_PROPERTY,
++        1 * 1024 * 1024);
++    conf.setLong(
++        TaskTracker.MAPRED_TASKTRACKER_PHSYICALMEMORY_RESERVED_PROPERTY,
++        512 * 1024);
++    try {
++      System.setProperty("os.name", "Testing");
++      setUpCluster(conf);
++      runSleepJob();
++      verifyTestResults();
++    } finally {
++      System.setProperty("os.name", osName);
++      tearDownCluster();
++    }
++  }
++
++  /**
++   * Test that verifies that total memory values are calculated and reported
++   * correctly.
++   * 
++   * @throws Exception
++   */
++  public void testMemoryValuesOnLinux()
++      throws Exception {
++    if (!System.getProperty("os.name").startsWith("Linux")) {
++      return;
++    }
++
++    JobConf conf = new JobConf();
++    LinuxMemoryCalculatorPlugin plugin = new LinuxMemoryCalculatorPlugin();
++    conf.setLong("totalVmemOnTT", plugin.getVirtualMemorySize());
++    conf.setLong("totalPmemOnTT", plugin.getPhysicalMemorySize());
++    conf.setLong("reservedVmemOnTT", 1 * 1024 * 1024);
++    conf.setLong("reservedPmemOnTT", 512 * 1024);
++    conf.setLong(
++        TaskTracker.MAPRED_TASKTRACKER_VIRTUALMEMORY_RESERVED_PROPERTY,
++        1 * 1024 * 1024);
++    conf.setLong(
++        TaskTracker.MAPRED_TASKTRACKER_PHSYICALMEMORY_RESERVED_PROPERTY,
++        512 * 1024);
++    try {
++      setUpCluster(conf);
++      runSleepJob();
++      verifyTestResults();
++    } finally {
++      tearDownCluster();
++    }
++  }
++
++  private void setUpCluster(JobConf conf)
++                                throws Exception {
++    conf.setClass("mapred.jobtracker.taskScheduler", 
++        TestTTMemoryReporting.FakeTaskScheduler.class,
++        TaskScheduler.class);
++    miniDFSCluster = new MiniDFSCluster(conf, 1, true, null);
++    FileSystem fileSys = miniDFSCluster.getFileSystem();
++    String namenode = fileSys.getUri().toString();
++    miniMRCluster = new MiniMRCluster(1, namenode, 3, 
++                      null, null, conf);    
++  }
++  
++  private void runSleepJob() throws Exception {
++    Configuration conf = new Configuration();
++    conf.set("mapred.job.tracker", "localhost:"
++                              + miniMRCluster.getJobTrackerPort());
++    String[] args = { "-m", "1", "-r", "1",
++                      "-mt", "1000", "-rt", "1000" };
++    ToolRunner.run(conf, new SleepJob(), args);
++  }
++
++  private void verifyTestResults() {
++    FakeTaskScheduler scheduler = 
++      (FakeTaskScheduler)miniMRCluster.getJobTrackerRunner().
++                              getJobTracker().getTaskScheduler();
++    assertTrue(scheduler.getFailureMessage(), scheduler.hasTestPassed());
++  }
++  
++  private void tearDownCluster() {
++    if (miniMRCluster != null) { miniMRCluster.shutdown(); }
++    if (miniDFSCluster != null) { miniDFSCluster.shutdown(); }
++  }
++}
+Index: src/test/org/apache/hadoop/mapred/TestHighRAMJobs.java
+===================================================================
+--- src/test/org/apache/hadoop/mapred/TestHighRAMJobs.java	(revision 720747)
++++ src/test/org/apache/hadoop/mapred/TestHighRAMJobs.java	(working copy)
+@@ -1,242 +0,0 @@
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package org.apache.hadoop.mapred;
+-
+-import java.io.IOException;
+-import java.util.List;
+-
+-import org.apache.commons.logging.Log;
+-import org.apache.commons.logging.LogFactory;
+-import org.apache.hadoop.conf.Configuration;
+-import org.apache.hadoop.examples.SleepJob;
+-import org.apache.hadoop.fs.FileSystem;
+-import org.apache.hadoop.hdfs.MiniDFSCluster;
+-import org.apache.hadoop.util.ToolRunner;
+-
+-import junit.framework.TestCase;
+-
+-/**
+- * This test class tests the functionality related to configuring, reporting
+- * and computing memory related parameters in a Map/Reduce cluster.
+- * 
+- * Each test sets up a {@link MiniMRCluster} with a locally defined 
+- * {@link org.apache.hadoop.mapred.TaskScheduler}. This scheduler validates 
+- * the memory related configuration is correctly computed and reported from 
+- * the tasktracker in 
+- * {@link org.apache.hadoop.mapred.TaskScheduler.assignTasks()}.
+- *  
+- */
+-public class TestHighRAMJobs extends TestCase {
+-
+-  private static final Log LOG = LogFactory.getLog(TestHighRAMJobs.class);
+-
+-  private static final String DEFAULT_SLEEP_JOB_MAP_COUNT = "1";
+-  private static final String DEFAULT_SLEEP_JOB_REDUCE_COUNT = "1";
+-  private static final String DEFAULT_MAP_SLEEP_TIME = "1000";
+-  private static final String DEFAULT_REDUCE_SLEEP_TIME = "1000";
+-  private static final long DISABLED_VIRTUAL_MEMORY_LIMIT = -1L;
+-  
+-  private MiniDFSCluster miniDFSCluster;
+-  private MiniMRCluster miniMRCluster;
+-  
+-  public static class FakeTaskScheduler extends JobQueueTaskScheduler {
+-    
+-    private boolean hasPassed = true;
+-    private String message;
+-    private boolean isFirstTime = true;
+-    
+-    public FakeTaskScheduler() {
+-      super();
+-    }
+-    
+-    public boolean hasTestPassed() {
+-      return hasPassed;
+-    }
+-    
+-    public String getFailureMessage() {
+-      return message;
+-    }
+-    
+-    @Override
+-    public List<Task> assignTasks(TaskTrackerStatus status) 
+-                                          throws IOException {
+-      TestHighRAMJobs.LOG.info("status = " + status.getResourceStatus().getFreeVirtualMemory());
+-
+-      long initialFreeMemory = getConf().getLong("initialFreeMemory", 0L);
+-      long totalMemoryOnTT = getConf().getLong("totalMemoryOnTT", 0L);
+-
+-      if (isFirstTime) {
+-        isFirstTime = false;
+-        if (initialFreeMemory != status.getResourceStatus().getFreeVirtualMemory()) {
+-          hasPassed = false;
+-          message = "Initial memory expected = " + initialFreeMemory
+-                      + " reported = " + status.getResourceStatus().getFreeVirtualMemory();
+-        }
+-        if (totalMemoryOnTT != status.getResourceStatus().getTotalMemory()) {
+-          hasPassed = false;
+-          message = "Total memory on TT expected = " + totalMemoryOnTT
+-                      + " reported = " 
+-                      + status.getResourceStatus().getTotalMemory();
+-        }
+-      } else if (initialFreeMemory != DISABLED_VIRTUAL_MEMORY_LIMIT) {
+-        
+-        long memoryPerTask = getConf().getLong("memoryPerTask", 0L);
+-          
+-        long expectedFreeMemory = 0;
+-        int runningTaskCount = status.countMapTasks() +
+-                              status.countReduceTasks();
+-        expectedFreeMemory = initialFreeMemory - 
+-                                (memoryPerTask * runningTaskCount);
+-
+-        TestHighRAMJobs.LOG.info("expected free memory = " + 
+-                                  expectedFreeMemory + ", reported = " + 
+-                                  status.getResourceStatus().getFreeVirtualMemory());
+-        if (expectedFreeMemory != status.getResourceStatus().getFreeVirtualMemory()) {
+-          hasPassed = false;
+-          message = "Expected free memory after " + runningTaskCount
+-                      + " tasks are scheduled = " + expectedFreeMemory
+-                      + ", reported = " + status.getResourceStatus().getFreeVirtualMemory();
+-        }
+-      }
+-      return super.assignTasks(status);
+-    }
+-  }
+-  
+-  /* Test that verifies default values are configured and reported
+-   * correctly.
+-   */
+-  public void testDefaultValuesForHighRAMJobs() throws Exception {
+-    long defaultMemoryLimit = DISABLED_VIRTUAL_MEMORY_LIMIT;
+-    try {
+-      setUpCluster(defaultMemoryLimit, defaultMemoryLimit, null);
+-      runJob(defaultMemoryLimit, DEFAULT_MAP_SLEEP_TIME, 
+-          DEFAULT_REDUCE_SLEEP_TIME, DEFAULT_SLEEP_JOB_MAP_COUNT, 
+-          DEFAULT_SLEEP_JOB_REDUCE_COUNT);
+-      verifyTestResults();
+-    } finally {
+-      tearDownCluster();
+-    }
+-  }
+-  
+-  /* Test that verifies default value for memory per task on TT
+-   * when the number of slots is non-default.
+-   */
+-  public void testDefaultMemoryPerTask() throws Exception {
+-    long maxVmem = 2*1024*1024*1024L;
+-    JobConf conf = new JobConf();
+-    conf.setInt("mapred.tasktracker.map.tasks.maximum", 2);
+-    conf.setInt("mapred.tasktracker.reduce.tasks.maximum", 2);
+-    // set a different value for the default memory per task
+-    long defaultMemPerTask = 256*1024*1024L; 
+-    try {
+-      setUpCluster(maxVmem, defaultMemPerTask, 
+-                    defaultMemPerTask, conf);
+-      runJob(DISABLED_VIRTUAL_MEMORY_LIMIT, "10000",
+-              DEFAULT_REDUCE_SLEEP_TIME, DEFAULT_SLEEP_JOB_MAP_COUNT,
+-              DEFAULT_SLEEP_JOB_REDUCE_COUNT);
+-      verifyTestResults();
+-    } finally {
+-      tearDownCluster();
+-    }
+-  }
+-  
+-  public void testHighRAMJob() throws Exception {
+-    long maxVmem = 1024*1024*1024L;
+-    //long defaultMemPerTaskOnTT = maxVmem/4; // 4 = default number of slots.
+-    /* Set a HIGH RAM requirement for a job. As 4 is the
+-     * default number of slots, we set up the memory limit
+-     * per task to be more than 25%. 
+-     */
+-    long maxVmemPerTask = maxVmem/3;
+-    try {
+-      setUpCluster(maxVmem, maxVmemPerTask, null);
+-      /* set up sleep limits higher, so the scheduler will see varying
+-       * number of running tasks at a time. Also modify the number of
+-       * map tasks so we test the iteration over more than one task.
+-       */
+-      runJob(maxVmemPerTask, "10000", "10000", "2", 
+-                      DEFAULT_SLEEP_JOB_REDUCE_COUNT);
+-      verifyTestResults();
+-    } finally {
+-      tearDownCluster();
+-    }
+-  }
+-  
+-  private void setUpCluster(long totalMemoryOnTT, long memoryPerTask,
+-                              JobConf conf) throws Exception {
+-    this.setUpCluster(totalMemoryOnTT, 512*1024*1024L, 
+-                          memoryPerTask, conf);
+-  }
+-  
+-  private void setUpCluster(long totalMemoryOnTT, long defaultMemoryPerTask,
+-                              long memoryPerTask, JobConf conf)
+-                                throws Exception {
+-    if (conf == null) {
+-      conf = new JobConf();
+-    }
+-    conf.setClass("mapred.jobtracker.taskScheduler", 
+-        TestHighRAMJobs.FakeTaskScheduler.class,
+-        TaskScheduler.class);
+-    if (totalMemoryOnTT != -1L) {
+-      conf.setLong("mapred.tasktracker.tasks.maxmemory", totalMemoryOnTT);  
+-    }
+-    conf.setLong("mapred.task.default.maxmemory", defaultMemoryPerTask);
+-    conf.setLong("initialFreeMemory", totalMemoryOnTT);
+-    conf.setLong("totalMemoryOnTT", totalMemoryOnTT);
+-    conf.setLong("memoryPerTask", memoryPerTask);
+-    miniDFSCluster = new MiniDFSCluster(conf, 1, true, null);
+-    FileSystem fileSys = miniDFSCluster.getFileSystem();
+-    String namenode = fileSys.getUri().toString();
+-    miniMRCluster = new MiniMRCluster(1, namenode, 3, 
+-                      null, null, conf);    
+-  }
+-  
+-  private void runJob(long memoryPerTask, String mapSleepTime,
+-                        String reduceSleepTime, String mapTaskCount,
+-                        String reduceTaskCount) 
+-                                        throws Exception {
+-    Configuration sleepJobConf = new Configuration();
+-    sleepJobConf.set("mapred.job.tracker", "localhost:"
+-                              + miniMRCluster.getJobTrackerPort());
+-    if (memoryPerTask != -1L) {
+-      sleepJobConf.setLong("mapred.task.maxmemory", memoryPerTask);
+-    }
+-    launchSleepJob(mapSleepTime, reduceSleepTime, 
+-                    mapTaskCount, reduceTaskCount, sleepJobConf);    
+-  }
+-
+-  private void launchSleepJob(String mapSleepTime, String reduceSleepTime,
+-                              String mapTaskCount, String reduceTaskCount,
+-                              Configuration conf) throws Exception {
+-    String[] args = { "-m", mapTaskCount, "-r", reduceTaskCount,
+-                      "-mt", mapSleepTime, "-rt", reduceSleepTime };
+-    ToolRunner.run(conf, new SleepJob(), args);
+-  }
+-
+-  private void verifyTestResults() {
+-    FakeTaskScheduler scheduler = 
+-      (FakeTaskScheduler)miniMRCluster.getJobTrackerRunner().
+-                              getJobTracker().getTaskScheduler();
+-    assertTrue(scheduler.getFailureMessage(), scheduler.hasTestPassed());
+-  }
+-  
+-  private void tearDownCluster() {
+-    if (miniMRCluster != null) { miniMRCluster.shutdown(); }
+-    if (miniDFSCluster != null) { miniDFSCluster.shutdown(); }
+-  }
+-}
+Index: src/contrib/fairscheduler/src/test/org/apache/hadoop/mapred/TestFairScheduler.java
+===================================================================
+--- src/contrib/fairscheduler/src/test/org/apache/hadoop/mapred/TestFairScheduler.java	(revision 720747)
++++ src/contrib/fairscheduler/src/test/org/apache/hadoop/mapred/TestFairScheduler.java	(working copy)
+@@ -161,7 +161,17 @@
+     public int getNextHeartbeatInterval() {
+       return MRConstants.HEARTBEAT_INTERVAL_MIN;
+     }
+-    
++
++    @Override
++    public void killJob(JobID jobid) {
++      return;
++    }
++
++    @Override
++    public JobInProgress getJob(JobID jobid) {
++      return null;
++    }
++
+     // Test methods
+     
+     public void submitJob(JobInProgress job) {
+Index: src/contrib/capacity-scheduler/src/test/org/apache/hadoop/mapred/TestCapacityScheduler.java
+===================================================================
+--- src/contrib/capacity-scheduler/src/test/org/apache/hadoop/mapred/TestCapacityScheduler.java	(revision 720747)
++++ src/contrib/capacity-scheduler/src/test/org/apache/hadoop/mapred/TestCapacityScheduler.java	(working copy)
+@@ -32,13 +32,18 @@
+ 
+ import junit.framework.TestCase;
+ 
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++
+ import org.apache.hadoop.io.BytesWritable;
+ import org.apache.hadoop.mapred.JobStatusChangeEvent.EventType;
+-//import org.apache.hadoop.mapred.CapacityTaskScheduler;
+ import org.apache.hadoop.conf.Configuration;
+ 
+ public class TestCapacityScheduler extends TestCase {
+-  
++
++  static final Log LOG =
++      LogFactory.getLog(org.apache.hadoop.mapred.TestCapacityScheduler.class);
++
+   private static int jobCounter;
+   
+   static class FakeJobInProgress extends JobInProgress {
+@@ -52,8 +57,7 @@
+       new HashSet<TaskInProgress>();
+     
+     public FakeJobInProgress(JobID jId, JobConf jobConf,
+-        FakeTaskTrackerManager taskTrackerManager, String user) 
+-    throws IOException {
++        FakeTaskTrackerManager taskTrackerManager, String user) {
+       super(jId, jobConf);
+       this.taskTrackerManager = taskTrackerManager;
+       this.startTime = System.currentTimeMillis();
+@@ -70,6 +74,8 @@
+       }
+       mapTaskCtr = 0;
+       redTaskCtr = 0;
++      super.setMaxVirtualMemoryForTask(jobConf.getMaxVirtualMemoryForTask());
++      super.setMaxPhysicalMemoryForTask(jobConf.getMaxPhysicalMemoryForTask());
+     }
+     
+     @Override
+@@ -206,15 +212,24 @@
+       new HashMap<String, TaskTrackerStatus>();
+     private Map<String, TaskStatus> taskStatuses = 
+       new HashMap<String, TaskStatus>();
++    private Map<JobID, JobInProgress> jobs =
++        new HashMap<JobID, JobInProgress>();
+ 
+     public FakeTaskTrackerManager() {
+-      trackers.put("tt1", new TaskTrackerStatus("tt1", "tt1.host", 1,
+-          new ArrayList<TaskStatus>(), 0,
+-          maxMapTasksPerTracker, maxReduceTasksPerTracker));
+-      trackers.put("tt2", new TaskTrackerStatus("tt2", "tt2.host", 2,
+-          new ArrayList<TaskStatus>(), 0,
+-          maxMapTasksPerTracker, maxReduceTasksPerTracker));
++      this(2, 2, 1);
+     }
++
++    public FakeTaskTrackerManager(int numTaskTrackers,
++        int maxMapTasksPerTracker, int maxReduceTasksPerTracker) {
++      this.maxMapTasksPerTracker = maxMapTasksPerTracker;
++      this.maxReduceTasksPerTracker = maxReduceTasksPerTracker;
++      for (int i = 1; i < numTaskTrackers + 1; i++) {
++        String ttName = "tt" + i;
++        trackers.put(ttName, new TaskTrackerStatus(ttName, ttName + ".host", i,
++            new ArrayList<TaskStatus>(), 0, maxMapTasksPerTracker,
++            maxReduceTasksPerTracker));
++      }
++    }
+     
+     public void addTaskTracker(String ttName) {
+       trackers.put(ttName, new TaskTrackerStatus(ttName, ttName + ".host", 1,
+@@ -237,7 +252,19 @@
+     public int getNextHeartbeatInterval() {
+       return MRConstants.HEARTBEAT_INTERVAL_MIN;
+     }
+-    
++
++    @Override
++    public void killJob(JobID jobid) throws IOException {
++      JobInProgress job = jobs.get(jobid);
++      finalizeJob(job, JobStatus.KILLED);
++      job.kill();
++    }
++
++    @Override
++    public JobInProgress getJob(JobID jobid) {
++      return jobs.get(jobid);
++    }
++
+     public Collection<TaskTrackerStatus> taskTrackers() {
+       return trackers.values();
+     }
+@@ -255,6 +282,7 @@
+       for (JobInProgressListener listener : listeners) {
+         listener.jobAdded(job);
+       }
++      jobs.put(job.getJobID(), job);
+     }
+     
+     public TaskTrackerStatus getTaskTracker(String trackerID) {
+@@ -269,6 +297,11 @@
+       }
+       TaskStatus status = new TaskStatus() {
+         @Override
++        public TaskAttemptID getTaskID() {
++          return t.getTaskID();
++        }
++
++        @Override
+         public boolean getIsMap() {
+           return t.isMapTask();
+         }
+@@ -292,9 +325,13 @@
+     }
+     
+     void finalizeJob(FakeJobInProgress fjob) {
++      finalizeJob(fjob, JobStatus.SUCCEEDED);
++    }
++
++    void finalizeJob(JobInProgress fjob, int state) {
+       // take a snapshot of the status before changing it
+       JobStatus oldStatus = (JobStatus)fjob.getStatus().clone();
+-      fjob.getStatus().setRunState(JobStatus.SUCCEEDED);
++      fjob.getStatus().setRunState(state);
+       JobStatus newStatus = (JobStatus)fjob.getStatus().clone();
+       JobStatusChangeEvent event = 
+         new JobStatusChangeEvent (fjob, EventType.RUN_STATE_CHANGED, oldStatus, 
+@@ -428,9 +465,16 @@
+   private FakeClock clock;
+ 
+   @Override
+-  protected void setUp() throws Exception {
++  protected void setUp() {
++    setUp(2, 2, 1);
++  }
++
++  private void setUp(int numTaskTrackers, int numMapTasksPerTracker,
++      int numReduceTasksPerTracker) {
+     jobCounter = 0;
+-    taskTrackerManager = new FakeTaskTrackerManager();
++    taskTrackerManager =
++        new FakeTaskTrackerManager(numTaskTrackers, numMapTasksPerTracker,
++            numReduceTasksPerTracker);
+     clock = new FakeClock();
+     scheduler = new CapacityTaskScheduler(clock);
+     scheduler.setTaskTrackerManager(taskTrackerManager);
+@@ -448,19 +492,33 @@
+       scheduler.terminate();
+     }
+   }
+-  
++
++  private FakeJobInProgress submitJob(int state, JobConf jobConf) {
++    FakeJobInProgress job =
++        new FakeJobInProgress(new JobID("test", ++jobCounter),
++            (jobConf == null ? new JobConf() : jobConf), taskTrackerManager,
++            jobConf.getUser());
++    job.getStatus().setRunState(state);
++    taskTrackerManager.submitJob(job);
++    return job;
++  }
++
++  private FakeJobInProgress submitJobAndInit(int state, JobConf jobConf)
++      throws IOException {
++    FakeJobInProgress j = submitJob(state, jobConf);
++    scheduler.jobQueuesManager.jobUpdated(initTasksAndReportEvent(j));
++    return j;
++  }
++
+   private FakeJobInProgress submitJob(int state, int maps, int reduces, 
+-      String queue, String user) throws IOException {
++      String queue, String user) {
+     JobConf jobConf = new JobConf(conf);
+     jobConf.setNumMapTasks(maps);
+     jobConf.setNumReduceTasks(reduces);
+     if (queue != null)
+       jobConf.setQueueName(queue);
+-    FakeJobInProgress job = new FakeJobInProgress(
+-        new JobID("test", ++jobCounter), jobConf, taskTrackerManager, user);
+-    job.getStatus().setRunState(state);
+-    taskTrackerManager.submitJob(job);
+-    return job;
++    jobConf.setUser(user);
++    return submitJob(state, jobConf);
+   }
+   
+   // Submit a job and update the listeners
+@@ -1171,6 +1229,308 @@
+     assertEquals(schedulingInfo, schedulingInfo2);   
+   }
+ 
++  /**
++   * Test to verify that highMemoryJobs are scheduled like all other jobs when
++   * memory-based scheduling is not enabled.
++   * @throws IOException
++   */
++  public void testDisabledMemoryBasedScheduling()
++      throws IOException {
++
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(1, 1, 1);
++
++    // Limited TT - 1GB vmem and 512MB pmem
++    taskTrackerManager.getTaskTracker("tt1").getResourceStatus()
++        .setTotalVirtualMemory(1 * 1024 * 1024);
++    taskTrackerManager.getTaskTracker("tt1").getResourceStatus()
++        .setTotalPhysicalMemory(512 * 1024);
++
++    taskTrackerManager.addQueues(new String[] { "default" });
++    resConf = new FakeResourceManagerConf();
++    ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
++    queues.add(new FakeQueueInfo("default", 100.0f, 1000000, true, 25));
++    resConf.setFakeQueues(queues);
++    scheduler.setResourceManagerConf(resConf);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    // memory-based scheduling disabled by default.
++    scheduler.start();
++
++    LOG.debug("Submit one high memory(3GB vmem, 1GBpmem) job of 1 map task "
++        + "and 1 reduce task.");
++    JobConf jConf = new JobConf();
++    jConf.setMaxVirtualMemoryForTask(3 * 1024 * 1024); // 3GB vmem
++    jConf.setMaxPhysicalMemoryForTask(1 * 1024 * 1024); // 1 GB pmem
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(1);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    submitJob(JobStatus.RUNNING, jConf);
++
++    // assert that all tasks are launched even though they transgress the
++    // scheduling limits.
++
++    checkAssignment("tt1", "attempt_test_0001_m_000001_0 on tt1");
++    checkAssignment("tt1", "attempt_test_0001_r_000001_0 on tt1");
++  }
++
++  /**
++   * Test to verify that highPmemJobs are scheduled like all other jobs when
++   * physical-memory based scheduling is not enabled.
++   * @throws IOException
++   */
++  public void testDisabledPmemBasedScheduling()
++      throws IOException {
++
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(1, 1, 1);
++
++    // Limited TT - 100GB vmem and 500MB pmem
++    TaskTrackerStatus.ResourceStatus ttStatus =
++        taskTrackerManager.getTaskTracker("tt1").getResourceStatus();
++    ttStatus.setTotalVirtualMemory(100 * 1024 * 1024);
++    ttStatus.setReservedVirtualMemory(0);
++    ttStatus.setTotalPhysicalMemory(500 * 1024);
++    ttStatus.setReservedPhysicalMemory(0);
++
++    taskTrackerManager.addQueues(new String[] { "default" });
++    resConf = new FakeResourceManagerConf();
++    ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
++    queues.add(new FakeQueueInfo("default", 100.0f, 1000000, true, 25));
++    resConf.setFakeQueues(queues);
++    scheduler.setResourceManagerConf(resConf);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    // enable vmem-based scheduling. pmem based scheduling disabled by default.
++    scheduler.getConf().setLong(JobConf.MAPRED_TASK_DEFAULT_MAXVM_PROPERTY,
++        1536 * 1024);
++    scheduler.getConf().setLong(JobConf.UPPER_LIMIT_ON_TASK_VMEM_PROPERTY,
++        3 * 1024 * 1024);
++    scheduler.start();
++
++    LOG.debug("Submit one high pmem(3GB vmem, 1GBpmem) job of 1 map task "
++        + "and 1 reduce task.");
++    JobConf jConf = new JobConf();
++    jConf.setMaxVirtualMemoryForTask(3 * 1024 * 1024); // 3GB vmem
++    jConf.setMaxPhysicalMemoryForTask(1 * 1024 * 1024); // 1 GB pmem
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(1);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    submitJob(JobStatus.RUNNING, jConf);
++
++    // assert that all tasks are launched even though they transgress the
++    // scheduling limits.
++
++    checkAssignment("tt1", "attempt_test_0001_m_000001_0 on tt1");
++    checkAssignment("tt1", "attempt_test_0001_r_000001_0 on tt1");
++  }
++
++  /**
++   * Test HighMemoryJobs.
++   * @throws IOException
++   */
++  public void testHighMemoryJobs()
++      throws IOException {
++
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(1, 1, 1);
++
++    TaskTrackerStatus.ResourceStatus ttStatus =
++        taskTrackerManager.getTaskTracker("tt1").getResourceStatus();
++    ttStatus.setTotalVirtualMemory(3 * 1024 * 1024);
++    ttStatus.setReservedVirtualMemory(0);
++    ttStatus.setTotalPhysicalMemory(1 * 1024 * 1024);
++    ttStatus.setReservedPhysicalMemory(0);
++    // Normal job on this TT would be 1.5GB vmem, 0.5GB pmem
++
++    taskTrackerManager.addQueues(new String[] { "default" });
++    resConf = new FakeResourceManagerConf();
++    ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
++    queues.add(new FakeQueueInfo("default", 100.0f, 1000000, true, 25));
++    resConf.setFakeQueues(queues);
++    scheduler.setResourceManagerConf(resConf);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    // enabled memory-based scheduling
++    scheduler.getConf().setLong(JobConf.MAPRED_TASK_DEFAULT_MAXVM_PROPERTY,
++        1536 * 1024);
++    scheduler.getConf().setLong(JobConf.UPPER_LIMIT_ON_TASK_VMEM_PROPERTY,
++        3 * 1024 * 1024);
++    scheduler.getConf().setFloat(
++        JobConf.DEFAULT_PERCENTAGE_OF_PMEM_IN_VMEM_PROPERTY, 33.3f);
++    scheduler.getConf().setLong(JobConf.UPPER_LIMIT_ON_TASK_PMEM_PROPERTY,
++        1 * 1024 * 1024);
++    scheduler.start();
++
++    LOG.debug("Submit one high memory(1600MB vmem, 400MB pmem) job of "
++        + "1 map task and 1 reduce task.");
++    JobConf jConf = new JobConf();
++    jConf.setMaxVirtualMemoryForTask(1600 * 1024); // 1.6GB vmem
++    jConf.setMaxPhysicalMemoryForTask(400 * 1024); // 400MB pmem
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(1);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    FakeJobInProgress job1 = submitJobAndInit(JobStatus.PREP, jConf);
++    checkAssignment("tt1", "attempt_test_0001_m_000001_0 on tt1");
++
++    // No more tasks of this job can run on the TT because of lack of vmem
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++
++    // Let attempt_test_0001_m_000001_0 finish, task assignment should succeed.
++    taskTrackerManager.finishTask("tt1", "attempt_test_0001_m_000001_0", job1);
++    checkAssignment("tt1", "attempt_test_0001_r_000001_0 on tt1");
++
++    LOG.debug("Submit another high memory(1200MB vmem, 800MB pmem) job of "
++        + "1 map task and 0 reduces.");
++    jConf.setMaxVirtualMemoryForTask(1200 * 1024L);
++    jConf.setMaxPhysicalMemoryForTask(800 * 1024L);
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(0);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    submitJobAndInit(JobStatus.PREP, jConf); // job2
++
++    // This job shouldn't run the TT now because of lack of pmem
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++
++    // Let attempt_test_0001_m_000002_0 finish, task assignment should succeed.
++    taskTrackerManager.finishTask("tt1", "attempt_test_0001_r_000001_0", job1);
++    checkAssignment("tt1", "attempt_test_0002_m_000001_0 on tt1");
++
++    LOG.debug("Submit a normal memory(200MB vmem, 100MB pmem) job of "
++        + "0 maps and 1 reduce task.");
++    jConf.setMaxVirtualMemoryForTask(200 * 1024L);
++    jConf.setMaxPhysicalMemoryForTask(100 * 1024);
++    jConf.setNumMapTasks(0);
++    jConf.setNumReduceTasks(1);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    submitJobAndInit(JobStatus.PREP, jConf); // job3
++
++    checkAssignment("tt1", "attempt_test_0003_r_000001_0 on tt1");
++  }
++
++  /**
++   * test invalid highMemoryJobs
++   * @throws IOException
++   */
++  public void testHighMemoryJobWithInvalidRequirements()
++      throws IOException {
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(1, 1, 1);
++    TaskTrackerStatus.ResourceStatus ttStatus =
++        taskTrackerManager.getTaskTracker("tt1").getResourceStatus();
++    ttStatus.setTotalVirtualMemory(3 * 1024 * 1024);
++    ttStatus.setReservedVirtualMemory(0);
++    ttStatus.setTotalPhysicalMemory(1 * 1024 * 1024);
++    ttStatus.setReservedPhysicalMemory(0);
++
++    resConf = new FakeResourceManagerConf();
++    ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
++    queues.add(new FakeQueueInfo("default", 100.0f, 1000000, true, 25));
++    taskTrackerManager.addQueues(new String[] { "default" });
++    resConf.setFakeQueues(queues);
++    scheduler.setResourceManagerConf(resConf);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    // enabled memory-based scheduling
++    scheduler.getConf().setLong(JobConf.MAPRED_TASK_DEFAULT_MAXVM_PROPERTY,
++        1536 * 1024);
++    scheduler.getConf().setLong(JobConf.UPPER_LIMIT_ON_TASK_VMEM_PROPERTY,
++        1 * 1024 * 1024);
++    scheduler.getConf().setFloat(
++        JobConf.DEFAULT_PERCENTAGE_OF_PMEM_IN_VMEM_PROPERTY, 33.3f);
++    scheduler.getConf().setLong(JobConf.UPPER_LIMIT_ON_TASK_PMEM_PROPERTY,
++        1 * 1024 * 1024);
++    scheduler.start();
++
++    LOG.debug("Submit one invalid high ram(5GB vmem, 3GB pmem) job of "
++        + "1 map, 0 reduce tasks.");
++    JobConf jConf = new JobConf();
++    jConf.setMaxVirtualMemoryForTask(5 * 1024 * 1024L);
++    jConf.setMaxPhysicalMemoryForTask(3 * 1024 * 1024L);
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(0);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    FakeJobInProgress job1 = submitJob(JobStatus.PREP, jConf);
++
++    // TTs should not run these jobs
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++
++    // Map-scheduler kills this job
++    // For job1, no cleanup task needed so gets killed immediately.
++    assertTrue(job1.getStatus().getRunState() == JobStatus.KILLED);
++  }
++
++  /**
++   * Test blocking of cluster for lack of memory.
++   * @throws IOException
++   */
++  public void testClusterBlockingForLackOfMemory()
++      throws IOException {
++
++    LOG.debug("Starting the scheduler.");
++    taskTrackerManager = new FakeTaskTrackerManager(1, 1, 1);
++    TaskTrackerStatus.ResourceStatus ttStatus =
++        taskTrackerManager.getTaskTracker("tt1").getResourceStatus();
++    ttStatus.setTotalVirtualMemory(3 * 1024 * 1024);
++    ttStatus.setReservedVirtualMemory(0);
++    ttStatus.setTotalPhysicalMemory(1 * 1024 * 1024);
++    ttStatus.setReservedPhysicalMemory(0);
++
++    resConf = new FakeResourceManagerConf();
++    ArrayList<FakeQueueInfo> queues = new ArrayList<FakeQueueInfo>();
++    queues.add(new FakeQueueInfo("default", 100.0f, 1000000, true, 25));
++    taskTrackerManager.addQueues(new String[] { "default" });
++    resConf.setFakeQueues(queues);
++    scheduler.setResourceManagerConf(resConf);
++    scheduler.setTaskTrackerManager(taskTrackerManager);
++    // enabled memory-based scheduling
++    scheduler.getConf().setLong(JobConf.MAPRED_TASK_DEFAULT_MAXVM_PROPERTY,
++        1536 * 1024);
++    scheduler.getConf().setLong(JobConf.UPPER_LIMIT_ON_TASK_VMEM_PROPERTY,
++        4 * 1024 * 1024);
++    scheduler.getConf().setFloat(
++        JobConf.DEFAULT_PERCENTAGE_OF_PMEM_IN_VMEM_PROPERTY, 33.3f);
++    scheduler.getConf().setLong(JobConf.UPPER_LIMIT_ON_TASK_PMEM_PROPERTY,
++        2 * 1024 * 1024);
++
++    scheduler.start();
++
++    LOG.debug("Submit one high memory(4GB vmem, 512MB pmem) job of "
++        + "1 map, 0 reduce tasks.");
++    JobConf jConf = new JobConf();
++    jConf.setMaxVirtualMemoryForTask(4 * 1024 * 1024L);
++    jConf.setMaxPhysicalMemoryForTask(512 * 1024L);
++    jConf.setNumMapTasks(1);
++    jConf.setNumReduceTasks(0);
++    jConf.setQueueName("default");
++    jConf.setUser("u1");
++    FakeJobInProgress job1 = submitJobAndInit(JobStatus.PREP, jConf);
++    // TTs should not run these jobs i.e. cluster blocked because of lock of
++    // vmem
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++
++    // Job should still be alive
++    assertTrue(job1.getStatus().getRunState() == JobStatus.RUNNING);
++
++    scheduler.taskTrackerManager.killJob(job1.getJobID());
++
++    LOG.debug("Submit one high memory(2GB vmem, 2GB pmem) job of "
++        + "1 map, 0 reduce tasks.");
++    jConf.setMaxVirtualMemoryForTask(2 * 1024 * 1024L);
++    jConf.setMaxPhysicalMemoryForTask(2 * 1024 * 1024L);
++    job1 = submitJobAndInit(JobStatus.PREP, jConf);
++    // TTs should not run these jobs i.e. cluster blocked because of lock of
++    // pmem now.
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++    assertNull(scheduler.assignTasks(tracker("tt1")));
++    
++    // Job should still be alive
++    assertTrue(job1.getStatus().getRunState() == JobStatus.RUNNING);
++  }
++
+   protected TaskTrackerStatus tracker(String taskTrackerName) {
+     return taskTrackerManager.getTaskTracker(taskTrackerName);
+   }
+Index: src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/CapacityTaskScheduler.java
+===================================================================
+--- src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/CapacityTaskScheduler.java	(revision 720747)
++++ src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/CapacityTaskScheduler.java	(working copy)
+@@ -229,8 +229,37 @@
+       return sb.toString();
+     }
+   }
+-  
+-  
++
++  private static enum TaskLookUpStatus {
++    STOP_LOOKING, JOBS_IN_THE_SAME_QUEUE, JOBS_IN_ANOTHER_QUEUE
++  }
++
++  private static class TaskLookupResult {
++
++    private Task task;
++    private String lookupStatusInfo;
++
++    private TaskLookUpStatus lookUpStatus;
++
++    TaskLookupResult(Task t, TaskLookUpStatus lUStatus, String statusInfo) {
++      this.task = t;
++      this.lookUpStatus = lUStatus;
++      this.lookupStatusInfo = statusInfo;
++    }
++
++    Task getTask() {
++      return task;
++    }
++
++    TaskLookUpStatus getLookUpStatus() {
++      return lookUpStatus;
++    }
++
++    String getLookupStatusInfo() {
++      return lookupStatusInfo;
++    }
++  }
++
+   /** 
+    * This class handles the scheduling algorithms. 
+    * The algos are the same for both Map and Reduce tasks. 
+@@ -247,8 +276,12 @@
+     /** our enclosing TaskScheduler object */
+     protected CapacityTaskScheduler scheduler;
+     // for debugging
+-    protected String type = null;
++    protected static enum TYPE {
++      MAP, REDUCE
++    }
+ 
++    protected TYPE type = null;
++
+     abstract Task obtainNewTask(TaskTrackerStatus taskTracker, 
+         JobInProgress job) throws IOException; 
+     abstract int getClusterCapacity();
+@@ -636,93 +669,394 @@
+         return false;
+       }
+     }
+-    
+-    private Task getTaskFromQueue(TaskTrackerStatus taskTracker, 
+-        QueueSchedulingInfo qsi) throws IOException {
+-      Task t = null;
++
++    /**
++     * Obtain the virtual memory allocated for a TIP.
++     * 
++     * If the TIP's job has a configured value for the max-virtual memory, that
++     * will be returned. Else, the cluster-wide default max-virtual memory for
++     * tasks is returned.
++     * 
++     * This method can only be called after
++     * {@link CapacityTaskScheduler#initializeMemoryRelatedConf()} is invoked.
++     * 
++     * @param id TaskAttemptID of the top
++     * @return the virtual memory allocated for the TIP.
++     */
++    private long getVirtualMemoryForTask(TaskAttemptID id) {
++      JobConf conf =
++          scheduler.taskTrackerManager.getJob(id.getJobID()).getJobConf();
++      long vMemForTask = conf.getMaxVirtualMemoryForTask();
++      if (vMemForTask == JobConf.DISABLED_MEMORY_LIMIT) {
++        vMemForTask =
++            new JobConf().getLong(JobConf.MAPRED_TASK_DEFAULT_MAXVM_PROPERTY,
++                scheduler.defaultMaxVmPerTask);
++      }
++      return vMemForTask;
++    }
++
++    /**
++     * Obtain the physical memory allocated for a TIP.
++     * 
++     * If the TIP's job has a configured value for the max physical memory, that
++     * will be returned. Else, the cluster-wide default physical memory for
++     * tasks is returned.
++     * 
++     * This method can only be called after
++     * {@link CapacityTaskScheduler#initializeMemoryRelatedConf()} is invoked.
++     * 
++     * @param id TaskAttempID of the tip
++     * @return the physical memory allocated for the TIP.
++     */
++    private long getPhysicalMemoryForTask(TaskAttemptID id) {
++      JobConf conf =
++          scheduler.taskTrackerManager.getJob(id.getJobID()).getJobConf();
++      long pMemForTask = conf.getMaxPhysicalMemoryForTask();
++      if (pMemForTask == JobConf.DISABLED_MEMORY_LIMIT) {
++        pMemForTask =
++            Math.round(getVirtualMemoryForTask(id)
++                * scheduler.defaultPercentOfPmemInVmem);
++      }
++      return pMemForTask;
++    }
++
++    /**
++     * Find the virtual memory that is already used by all the running tasks
++     * residing on the given TaskTracker.
++     * 
++     * This method should be called only when scheduling based on memory is
++     * enabled.
++     * 
++     * @param taskTracker
++     * @return amount of virtual memory that is used by the residing tasks
++     */
++    private synchronized long usedUpVmem(TaskTrackerStatus taskTracker) {
++      if (scheduler.defaultMaxVmPerTask == JobConf.DISABLED_MEMORY_LIMIT) {
++        return JobConf.DISABLED_MEMORY_LIMIT;
++      }
++
++      long vmem = 0;
++
++      for (TaskStatus task : taskTracker.getTaskReports()) {
++        // the following task states are one in which the slot is
++        // still occupied and hence memory of the task should be
++        // accounted in used memory.
++        if ((task.getRunState() == TaskStatus.State.RUNNING)
++            || (task.getRunState() == TaskStatus.State.COMMIT_PENDING)) {
++          vmem += getVirtualMemoryForTask(task.getTaskID());
++        }
++      }
++      return vmem;
++    }
++
++    /**
++     * Find the physical memory that is already used by all the running tasks
++     * residing on the given TaskTracker.
++     * 
++     * This method should be called only when scheduling based on memory is
++     * enabled.
++     * 
++     * @param taskTracker
++     * @return amount of physical memory that is used by the residing tasks
++     */
++    private synchronized long usedUpPmem(TaskTrackerStatus taskTracker) {
++      if (scheduler.defaultPercentOfPmemInVmem == JobConf.DISABLED_MEMORY_LIMIT) {
++        return JobConf.DISABLED_MEMORY_LIMIT;
++      }
++
++      long pmem = 0;
++
++      for (TaskStatus task : taskTracker.getTaskReports()) {
++        // the following task states are one in which the slot is
++        // still occupied and hence memory of the task should be
++        // accounted in used memory.
++        if ((task.getRunState() == TaskStatus.State.RUNNING)
++            || (task.getRunState() == TaskStatus.State.COMMIT_PENDING)) {
++          pmem += getPhysicalMemoryForTask(task.getTaskID());
++        }
++      }
++      return pmem;
++    }
++
++    private boolean isSchedulingBasedOnMemoryEnabled() {
++      LOG.debug("defaultMaxVmPerTask : " + scheduler.defaultMaxVmPerTask
++          + " limitMaxVmemForTasks : " + scheduler.limitMaxVmemForTasks);
++      if (scheduler.defaultMaxVmPerTask == JobConf.DISABLED_MEMORY_LIMIT
++          || scheduler.limitMaxVmemForTasks == JobConf.DISABLED_MEMORY_LIMIT) {
++        return false;
++      }
++      return true;
++    }
++
++    private boolean isSchedulingBasedOnPmemEnabled() {
++      LOG.debug("defaultPercentOfPmemInVmem : "
++          + scheduler.defaultPercentOfPmemInVmem + " limitMaxPmemForTasks : "
++          + scheduler.limitMaxPmemForTasks);
++      if (scheduler.defaultPercentOfPmemInVmem == JobConf.DISABLED_MEMORY_LIMIT
++          || scheduler.limitMaxPmemForTasks == JobConf.DISABLED_MEMORY_LIMIT) {
++        return false;
++      }
++      return true;
++    }
++
++    /**
++     * Check if a TT has enough pmem and vmem to run this job.
++     * @param job
++     * @param taskTracker
++     * @return true if this TT has enough memory for this job. False otherwise.
++     */
++    private boolean TTHasEnoughMemoryForJob(JobInProgress job,
++        TaskTrackerStatus taskTracker) {
++
++      // ////////////// vmem based scheduling
++      if (!isSchedulingBasedOnMemoryEnabled()) {
++        LOG.info("One of the configuration parameters defaultMaxVmPerTask "
++            + "and limitMaxVmemPerTasks is not configured. Scheduling based "
++            + "on job's memory requirements is disabled, ignoring any value "
++            + "set by job.");
++        return true;
++      }
++
++      TaskTrackerStatus.ResourceStatus resourceStatus =
++          taskTracker.getResourceStatus();
++      long totalVMemOnTT = resourceStatus.getTotalVirtualMemory();
++      long reservedVMemOnTT = resourceStatus.getReservedTotalMemory();
++
++      if (totalVMemOnTT == JobConf.DISABLED_MEMORY_LIMIT
++          || reservedVMemOnTT == JobConf.DISABLED_MEMORY_LIMIT) {
++        return true;
++      }
++
++      // TODO: what if reservedVMemOnTT > totalVMemOnTT??
++
++      long jobVMemForTask = job.getMaxVirtualMemoryForTask();
++      if (jobVMemForTask == JobConf.DISABLED_MEMORY_LIMIT) {
++        jobVMemForTask = scheduler.defaultMaxVmPerTask;
++      }
++
++      long vmemUsedOnTT = usedUpVmem(taskTracker);
++      long freeVmemUsedOnTT = totalVMemOnTT - vmemUsedOnTT - reservedVMemOnTT;
++
++      if (jobVMemForTask > freeVmemUsedOnTT) {
++        return false;
++      }
++
++      // ////////////// pmem based scheduling
++
++      long totalPmemOnTT = resourceStatus.getTotalPhysicalMemory();
++      long reservedPmemOnTT = resourceStatus.getReservedPhysicalMemory();
++      long jobPMemForTask = job.getMaxPhysicalMemoryForTask();
++      long freePmemUsedOnTT = 0;
++
++      if (isSchedulingBasedOnPmemEnabled()) {
++        if (totalPmemOnTT == JobConf.DISABLED_MEMORY_LIMIT
++            || reservedPmemOnTT == JobConf.DISABLED_MEMORY_LIMIT) {
++          return true;
++        }
++
++        // TODO: what if reservedPMemOnTT > totalPMemOnTT??
++
++        if (jobPMemForTask == JobConf.DISABLED_MEMORY_LIMIT) {
++          jobPMemForTask =
++             Math.round(jobVMemForTask * scheduler.defaultPercentOfPmemInVmem);
++        }
++
++        freePmemUsedOnTT =
++            totalPmemOnTT - usedUpPmem(taskTracker) - reservedPmemOnTT;
++
++        if (jobPMemForTask > freePmemUsedOnTT) {
++          return false;
++        }
++      } else {
++        LOG.info("One of the configuration parameters "
++            + "defaultPercentOfPmemInVmem and limitMaxPmemPerTasks is not "
++            + "configured. Scheduling based on job's physical memory "
++            + "requirements is disabled, ignoring any value set by job.");
++      }
++
++      LOG.info("freeVMemOnTT = " + freeVmemUsedOnTT + " totalVMemOnTT = "
++          + totalVMemOnTT + " freePMemOnTT = " + freePmemUsedOnTT
++          + " totalPMemOnTT = " + totalPmemOnTT + " jobVMemForTask = "
++          + jobVMemForTask + " jobPMemForTask = " + jobPMemForTask);
++      return true;
++    }
++
++    private TaskLookupResult getTaskFromQueue(TaskTrackerStatus taskTracker,
++        QueueSchedulingInfo qsi)
++        throws IOException {
++
+       // keep track of users over limit
+       Set<String> usersOverLimit = new HashSet<String>();
+-      // look at running jobs first
+-      for (JobInProgress j:
+-        scheduler.jobQueuesManager.getRunningJobQueue(qsi.queueName)) {
+-        // some jobs may be in the running queue but may have completed 
++
++      // Look at running jobs first, skipping jobs of those users who are over
++      // their limits
++      TaskLookupResult result =
++          getTaskFromRunningJobQueue(taskTracker, qsi, usersOverLimit, true);
++      if (result != null) {
++        return result;
++      }
++
++      // No task from running jobs of all user within limits. Look at the
++      // waiting jobs, skipping jobs of those users who are over their limits.
++      result =
++          getTaskFromWaitingJobQueue(taskTracker, qsi, usersOverLimit, true);
++      if (result != null) {
++        return result;
++      }
++
++      // if we're here, we haven't found anything. This could be because
++      // there is nothing to run, or that the user limit for some user is
++      // too strict, i.e., there's at least one user who doesn't have
++      // enough tasks to satisfy his limit. If it's the later case, look at
++      // jobs without considering user limits, and get task from first
++      // eligible job
++      if (usersOverLimit.size() > 0) {
++        // look at running jobs, considering users over limit
++        result =
++            getTaskFromRunningJobQueue(taskTracker, qsi, usersOverLimit, false);
++        if (result != null) {
++          return result;
++        }
++
++        // Look at the waiting queue considering users over limit
++        result =
++            getTaskFromWaitingJobQueue(taskTracker, qsi, usersOverLimit, false);
++        if (result != null) {
++          return result;
++        }
++      }
++
++      // found nothing for this queue, look at the next one.
++      return new TaskLookupResult(null, TaskLookUpStatus.JOBS_IN_ANOTHER_QUEUE,
++          null);
++    }
++
++    // get a task from the running queue
++    private TaskLookupResult getTaskFromRunningJobQueue(
++        TaskTrackerStatus taskTracker, QueueSchedulingInfo qsi,
++        Set<String> usersOverLimit, boolean skipUsersOverLimit)
++        throws IOException {
++      TaskLookupResult tlr = null;
++
++      for (JobInProgress j : scheduler.jobQueuesManager
++          .getRunningJobQueue(qsi.queueName)) {
++        // some jobs may be in the running queue but may have completed
+         // and not yet have been removed from the running queue
+         if (j.getStatus().getRunState() != JobStatus.RUNNING) {
+           continue;
+         }
+-        // is this job's user over limit?
+-        if (isUserOverLimit(j, qsi)) {
+-          // user over limit. 
+-          usersOverLimit.add(j.getProfile().getUser());
++
++        if (skipUsersOverLimit) {
++          // consider jobs of only those users who are under limits
++          if (isUserOverLimit(j, qsi)) {
++            usersOverLimit.add(j.getProfile().getUser());
++            continue;
++          }
++        } else {
++          // consider jobs of only those users who are over limit
++          if (!usersOverLimit.contains(j.getProfile().getUser())) {
++            continue;
++          }
++        }
++
++        // We found a suitable job. Try getting a task from it.
++        tlr = getTaskFromJob(j, taskTracker, qsi);
++        TaskLookUpStatus lookUpStatus = tlr.getLookUpStatus();
++        if (lookUpStatus == TaskLookUpStatus.JOBS_IN_THE_SAME_QUEUE) {
++          // Go to the next job in the same queue.
++          tlr = null;
+           continue;
+         }
+-        // We found a suitable job. Get task from it.
+-        t = obtainNewTask(taskTracker, j);
+-        if (t != null) {
+-          LOG.debug("Got task from job " + 
+-                    j.getJobID() + " in queue " + qsi.queueName);
+-          return t;
+-        }
++
++        // No need for considering the next jobs in this queue.
++        break;
+       }
+-      
+-      // if we're here, we found nothing in the running jobs. Time to 
++
++      return tlr;
++    }
++
++    private TaskLookupResult getTaskFromWaitingJobQueue(
++        TaskTrackerStatus taskTracker, QueueSchedulingInfo qsi,
++        Set<String> usersOverLimit, boolean skipUsersOverLimit)
++        throws IOException {
++      // if we're here, we found nothing in the running jobs. Time to
+       // look at waiting jobs. Get first job of a user that is not over limit
+-      for (JobInProgress j: 
+-        scheduler.jobQueuesManager.getWaitingJobQueue(qsi.queueName)) {
+-        // is this job's user over limit?
+-        if (usersOverLimit.contains(j.getProfile().getUser())) {
+-          // user over limit. 
+-          continue;
++
++      TaskLookupResult tlr = null;
++      for (JobInProgress j : scheduler.jobQueuesManager
++          .getWaitingJobQueue(qsi.queueName)) {
++
++        if (skipUsersOverLimit) {
++          // consider jobs of only those users who are under limits
++          if (usersOverLimit.contains(j.getProfile().getUser())) {
++            continue;
++          }
++        } else {
++          // consider jobs of only those users who are over limits
++          if (!usersOverLimit.contains(j.getProfile().getUser())) {
++            continue;
++          }
+         }
+-        // this job is a candidate for running. Initialize it, move it
+-        // to run queue
++
++        LOG.info("initializing " + j.getJobID());
+         j.initTasks();
+-        // We found a suitable job. Get task from it.
+-        t = obtainNewTask(taskTracker, j);
+-        if (t != null) {
+-          LOG.debug("Getting task from job " + 
+-                    j.getJobID() + " in queue " + qsi.queueName);
+-          return t;
++
++        // We found a suitable job. See if we can run it now.
++        if (j.getStatus().getRunState() != JobStatus.RUNNING) {
++          // keep looking
++          continue;
+         }
++
++        tlr = getTaskFromJob(j, taskTracker, qsi);
++        TaskLookUpStatus lookUpStatus = tlr.getLookUpStatus();
++        if (lookUpStatus == TaskLookUpStatus.JOBS_IN_THE_SAME_QUEUE) {
++          // Go to the next job in the same queue.
++          tlr = null;
++          continue;
++        }
++
++        // No need for considering the next jobs in this queue.
++        break;
+       }
+-      
+-      // if we're here, we haven't found anything. This could be because 
+-      // there is nothing to run, or that the user limit for some user is 
+-      // too strict, i.e., there's at least one user who doesn't have
+-      // enough tasks to satisfy his limit. If it's the later case, look at 
+-      // jobs without considering user limits, and get task from first 
+-      // eligible job
+-      if (usersOverLimit.size() > 0) {
+-        for (JobInProgress j:
+-          scheduler.jobQueuesManager.getRunningJobQueue(qsi.queueName)) {
+-          if ((j.getStatus().getRunState() == JobStatus.RUNNING) && 
+-              (usersOverLimit.contains(j.getProfile().getUser()))) {
+-            t = obtainNewTask(taskTracker, j);
+-            if (t != null) {
+-              LOG.debug("Getting task from job " + 
+-                        j.getJobID() + " in queue " + qsi.queueName);
+-              return t;
+-            }
++
++      return tlr;
++    }
++
++    private TaskLookupResult getTaskFromJob(JobInProgress j,
++        TaskTrackerStatus taskTracker, QueueSchedulingInfo qsi)
++        throws IOException {
++      int pendingTasks =
++          (type == TaskSchedulingMgr.TYPE.MAP ? j.pendingMaps()
++              : type == TaskSchedulingMgr.TYPE.REDUCE ? j.pendingReduces() : 0);
++      if (pendingTasks != 0) {
++        // Not accurate TODO:
++        if (TTHasEnoughMemoryForJob(j, taskTracker)) {
++          // We found a suitable job. Get task from it.
++          Task t = obtainNewTask(taskTracker, j);
++          if (t != null) {
++            LOG.debug("Got task from job " + j.getJobID().toString()
++                + " in queue " + qsi.queueName);
++            return new TaskLookupResult(t,
++                TaskLookUpStatus.STOP_LOOKING, null);
+           }
++        } else {
++          // block the cluster, till this job's tasks can be scheduled.
++          String msg =
++              j.getJobID() + "'s tasks don't fit on the TaskTracker "
++                  + taskTracker.trackerName
++                  + ". Returning no task to the taskTracker";
++          LOG.info(msg);
++          return new TaskLookupResult(null,
++              TaskLookUpStatus.STOP_LOOKING, msg);
+         }
+-        // look at waiting jobs the same way
+-        for (JobInProgress j: 
+-          scheduler.jobQueuesManager.getWaitingJobQueue(qsi.queueName)) {
+-          if (usersOverLimit.contains(j.getProfile().getUser())) {
+-            j.initTasks();
+-            t = obtainNewTask(taskTracker, j);
+-            if (t != null) {
+-              LOG.debug("Getting task from job " + 
+-                        j.getJobID() + " in queue " + qsi.queueName);
+-              return t;
+-            }
+-          }
+-        }
+       }
+-      
+-      return null;
++
++      LOG.info(j.getJobID() + " doesn't have any tasks to run."
++          + "Continuing with other jobs.");
++      return new TaskLookupResult(null,
++          TaskLookUpStatus.JOBS_IN_THE_SAME_QUEUE, null);
+     }
+-    
++
+     private List<Task> assignTasks(TaskTrackerStatus taskTracker) throws IOException {
+       Task t = null;
+ 
+@@ -733,7 +1067,7 @@
+        * becomes expensive, do it once every few hearbeats only.
+        */ 
+       updateQSIObjects();
+-      LOG.debug("After updating QSI objects:");
++      LOG.debug("After updating QSI objects in " + this.type + " scheduler :");
+       printQSIs();
+       /*
+        * sort list of qeues first, as we want queues that need the most to
+@@ -741,7 +1075,7 @@
+        * We're only sorting a collection of queues - there shouldn't be many.
+        */
+       updateCollectionOfQSIs();
+-      for (QueueSchedulingInfo qsi: qsiForAssigningTasks) {
++      for (QueueSchedulingInfo qsi : qsiForAssigningTasks) {
+         if (qsi.guaranteedCapacity <= 0.0f) {
+           // No capacity is guaranteed yet for this queue.
+           // Queues are sorted so that ones without capacities
+@@ -749,17 +1083,64 @@
+           // from here without considering any further queues.
+           return null;
+         }
+-        t = getTaskFromQueue(taskTracker, qsi);
+-        if (t!= null) {
+-          // we have a task. Update reclaimed resource info
+-          updateReclaimedResources(qsi);
+-          return Collections.singletonList(t);
++
++        // Kill all the jobs that cannot run in the cluster because of invalid
++        // resource requirements.
++        killJobsWithInvalidRequirements(qsi);
++
++        TaskLookupResult tlr = getTaskFromQueue(taskTracker, qsi);
++        TaskLookUpStatus lookUpStatus = tlr.getLookUpStatus();
++        if (lookUpStatus == TaskLookUpStatus.JOBS_IN_ANOTHER_QUEUE) {
++          continue; // Look in other queues.
+         }
+-      }        
+ 
++        if (lookUpStatus == TaskLookUpStatus.STOP_LOOKING) {
++          t = tlr.getTask();
++          if (t == null) {
++            // blocking the cluster.
++            String msg = tlr.getLookupStatusInfo();
++            if (msg != null) {
++              LOG.warn(msg);
++              LOG.warn("Returning nothing to the Tasktracker "
++                  + taskTracker.trackerName);
++              return null;
++            }
++          } else {
++            // we have a task. Update reclaimed resource info
++            updateReclaimedResources(qsi);
++            return Collections.singletonList(t);
++          }
++        }
++      }
++
+       // nothing to give
+       return null;
+     }
++
++    private void killJobsWithInvalidRequirements(QueueSchedulingInfo qsi) {
++      if (!isSchedulingBasedOnMemoryEnabled()) {
++        return;
++      }
++      for (JobInProgress jip : scheduler.jobQueuesManager
++          .getWaitingJobQueue(qsi.queueName)) {
++        if ((jip.getMaxVirtualMemoryForTask() > scheduler.limitMaxVmemForTasks)
++            || (isSchedulingBasedOnPmemEnabled() && (jip
++                .getMaxPhysicalMemoryForTask() > scheduler.limitMaxPmemForTasks))) {
++          LOG.warn(jip.getJobID() + " (" + jip.getMaxVirtualMemoryForTask()
++              + "vmem, " + jip.getMaxPhysicalMemoryForTask()
++              + "pmem) exceeds the cluster's max-memory-limits ("
++              + scheduler.limitMaxVmemForTasks + "vmem, "
++              + scheduler.limitMaxPmemForTasks
++              + "pmem). Cannot run in this cluster, so killing it.");
++          try {
++            scheduler.taskTrackerManager.killJob(jip.getJobID());
++          } catch (IOException ioe) {
++            LOG.warn("Failed to kill the job " + jip.getJobID() + ". Reason : "
++                + StringUtils.stringifyException(ioe));
++          }
++        }
++      }
++    }
+     
+     private void printQSIs() {
+       StringBuffer s = new StringBuffer();
+@@ -788,7 +1169,7 @@
+   private static class MapSchedulingMgr extends TaskSchedulingMgr {
+     MapSchedulingMgr(CapacityTaskScheduler dad) {
+       super(dad);
+-      type = new String("map");
++      type = TaskSchedulingMgr.TYPE.MAP;
+     }
+     Task obtainNewTask(TaskTrackerStatus taskTracker, JobInProgress job) 
+     throws IOException {
+@@ -865,7 +1246,7 @@
+   private static class ReduceSchedulingMgr extends TaskSchedulingMgr {
+     ReduceSchedulingMgr(CapacityTaskScheduler dad) {
+       super(dad);
+-      type = new String("reduce");
++      type = TaskSchedulingMgr.TYPE.REDUCE;
+     }
+     Task obtainNewTask(TaskTrackerStatus taskTracker, JobInProgress job) 
+     throws IOException {
+@@ -923,7 +1304,7 @@
+    * heartbeats left. */
+   private static final int HEARTBEATS_LEFT_BEFORE_KILLING = 3;
+ 
+-  private static final Log LOG = LogFactory.getLog(CapacityTaskScheduler.class);
++  static final Log LOG = LogFactory.getLog(CapacityTaskScheduler.class);
+   protected JobQueuesManager jobQueuesManager;
+   protected CapacitySchedulerConf rmConf;
+   /** whether scheduler has started or not */
+@@ -966,7 +1347,11 @@
+   }
+   private Clock clock;
+ 
+-  
++  long limitMaxVmemForTasks;
++  long limitMaxPmemForTasks;
++  long defaultMaxVmPerTask;
++  float defaultPercentOfPmemInVmem;
++
+   public CapacityTaskScheduler() {
+     this(new Clock());
+   }
+@@ -981,7 +1366,45 @@
+   public void setResourceManagerConf(CapacitySchedulerConf conf) {
+     this.rmConf = conf;
+   }
+-  
++
++  /**
++   *  Normalize the negative values in configuration
++   * @param val
++   * @return normalized val
++   */
++  private long normalizeMemoryConfigValue(long val) {
++    if (val < 0) {
++      val = JobConf.DISABLED_MEMORY_LIMIT;
++    }
++    return val;
++  }
++
++  private void initializeMemoryRelatedConf() {
++    Configuration jtConf = this.getConf(); // JT's conf
++
++    limitMaxVmemForTasks =
++        normalizeMemoryConfigValue(jtConf.getLong(
++            JobConf.UPPER_LIMIT_ON_TASK_VMEM_PROPERTY,
++            JobConf.DISABLED_MEMORY_LIMIT));
++
++    limitMaxPmemForTasks =
++        normalizeMemoryConfigValue(jtConf.getLong(
++            JobConf.UPPER_LIMIT_ON_TASK_PMEM_PROPERTY,
++            JobConf.DISABLED_MEMORY_LIMIT));
++
++    defaultMaxVmPerTask =
++        normalizeMemoryConfigValue(jtConf.getLong(
++            JobConf.MAPRED_TASK_DEFAULT_MAXVM_PROPERTY,
++            JobConf.DISABLED_MEMORY_LIMIT));
++
++    defaultPercentOfPmemInVmem =
++        jtConf.getFloat(JobConf.DEFAULT_PERCENTAGE_OF_PMEM_IN_VMEM_PROPERTY,
++            JobConf.DISABLED_MEMORY_LIMIT);
++    if (defaultPercentOfPmemInVmem < 0) {
++      defaultPercentOfPmemInVmem = JobConf.DISABLED_MEMORY_LIMIT;
++    }
++  }
++
+   @Override
+   public synchronized void start() throws IOException {
+     if (started) return;
+@@ -989,6 +1412,9 @@
+     RECLAIM_CAPACITY_INTERVAL = 
+       conf.getLong("mapred.capacity-scheduler.reclaimCapacity.interval", 5);
+     RECLAIM_CAPACITY_INTERVAL *= 1000;
++
++    initializeMemoryRelatedConf();
++
+     // initialize our queues from the config settings
+     if (null == rmConf) {
+       rmConf = new CapacitySchedulerConf();
+Index: src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/JobQueuesManager.java
+===================================================================
+--- src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/JobQueuesManager.java	(revision 720747)
++++ src/contrib/capacity-scheduler/src/java/org/apache/hadoop/mapred/JobQueuesManager.java	(working copy)
+@@ -143,7 +143,7 @@
+     LOG.info("Job " + job.getJobID().toString() + " submitted to queue " 
+              + job.getProfile().getQueueName() + " has completed");
+     // job could be in running or waiting queue
+-    if (qi.runningJobs.remove(oldInfo) != null) {
++    if (qi.runningJobs.remove(oldInfo) == null) {
+       qi.waitingJobs.remove(oldInfo);
+     }
+     // let scheduler know
+Index: src/core/org/apache/hadoop/util/MemoryCalculatorPlugin.java
+===================================================================
+--- src/core/org/apache/hadoop/util/MemoryCalculatorPlugin.java	(revision 0)
++++ src/core/org/apache/hadoop/util/MemoryCalculatorPlugin.java	(revision 0)
+@@ -0,0 +1,48 @@
++package org.apache.hadoop.util;
++
++import org.apache.hadoop.conf.Configuration;
++
++/**
++ * Plugin to calculate virtual and physical memories on the system.
++ * 
++ */
++public abstract class MemoryCalculatorPlugin {
++
++  /**
++   * Obtain the total size of the virtual memory present in the system.
++   * 
++   * @return virtual memory size.
++   */
++  public abstract long getVirtualMemorySize();
++
++  /**
++   * Obtain the total size of the physical memory present in the system.
++   * 
++   * @return physical memory size.
++   */
++  public abstract long getPhysicalMemorySize();
++
++  /**
++   * Get the MemoryCalculatorPlugin for this system.
++   * 
++   * @param conf
++   * @return MemoryCalculatorPlugin.
++   */
++  public static MemoryCalculatorPlugin getMemoryCalculatorPlugin(
++      Configuration conf) {
++    try {
++      String osName = System.getProperty("os.name");
++      if (osName.startsWith("Linux")) {
++        return new LinuxMemoryCalculatorPlugin();
++      } else if (osName.startsWith("Testing")) {
++        return new DummyMemoryCalculatorPlugin(conf);
++      }
++    } catch (SecurityException se) {
++      // Failed to get Operating System name.
++      return null;
++    }
++
++    // Not supported on this system.
++    return null;
++  }
++}
+Index: src/core/org/apache/hadoop/util/DummyMemoryCalculatorPlugin.java
+===================================================================
+--- src/core/org/apache/hadoop/util/DummyMemoryCalculatorPlugin.java	(revision 0)
++++ src/core/org/apache/hadoop/util/DummyMemoryCalculatorPlugin.java	(revision 0)
+@@ -0,0 +1,34 @@
++package org.apache.hadoop.util;
++
++import org.apache.hadoop.conf.Configuration;
++
++/**
++ * Plugin class to test virtual and physical memories reported by TT. Use
++ * configuration items mapred.tasktracker.maxpmem.testing and
++ * mapred.tasktracker.maxvmem.testing to tell TT the total vmem and the total
++ * pmem.
++ * 
++ */
++public class DummyMemoryCalculatorPlugin extends MemoryCalculatorPlugin {
++
++  public static final String MAXVMEM_TESTING_PROPERTY = "mapred.tasktracker.maxvmem.testing";
++  public static final String MAXPMEM_TESTING_PROPERTY = "mapred.tasktracker.maxpmem.testing";
++
++  Configuration conf;
++
++  public DummyMemoryCalculatorPlugin(Configuration conf) {
++    this.conf = conf;
++  }
++
++  /** {@inheritDoc} */
++  @Override
++  public long getVirtualMemorySize() {
++    return conf.getLong(MAXVMEM_TESTING_PROPERTY, -1);
++  }
++
++  /** {@inheritDoc} */
++  @Override
++  public long getPhysicalMemorySize() {
++    return conf.getLong(MAXPMEM_TESTING_PROPERTY, -1);
++  }
++}
+Index: src/core/org/apache/hadoop/util/LinuxMemoryCalculatorPlugin.java
+===================================================================
+--- src/core/org/apache/hadoop/util/LinuxMemoryCalculatorPlugin.java	(revision 0)
++++ src/core/org/apache/hadoop/util/LinuxMemoryCalculatorPlugin.java	(revision 0)
+@@ -0,0 +1,114 @@
++package org.apache.hadoop.util;
++
++import java.io.BufferedReader;
++import java.io.FileNotFoundException;
++import java.io.FileReader;
++import java.io.IOException;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++
++/**
++ * Plugin to calculate virtual and physical memories on Linux systems.
++ */
++public class LinuxMemoryCalculatorPlugin extends MemoryCalculatorPlugin {
++  private static final Log LOG =
++      LogFactory.getLog(LinuxMemoryCalculatorPlugin.class);
++
++  /**
++   * proc's meminfo virtual file has keys-values in the format
++   * "key:[ \t]*value[ \t]kB".
++   */
++  private static final String PROCFS_MEMFILE = "/proc/meminfo";
++  private static final Pattern PROCFS_MEMFILE_FORMAT =
++      Pattern.compile("^([a-zA-Z]*):[ \t]*([0-9]*)[ \t]kB");
++
++  // We just need the values for the keys MemTotal and SwapTotal
++  private static final String MEMTOTAL_STRING = "MemTotal";
++  private static final String SWAPTOTAL_STRING = "SwapTotal";
++
++  private long ramSize = 0;
++  private long swapSize = 0;
++
++  boolean readMemInfoFile = false;
++
++  private void readProcMemInfoFile() {
++
++    if (readMemInfoFile) {
++      return;
++    }
++
++    // Read "/proc/memInfo" file
++    BufferedReader in = null;
++    FileReader fReader = null;
++    try {
++      fReader = new FileReader(PROCFS_MEMFILE);
++      in = new BufferedReader(fReader);
++    } catch (FileNotFoundException f) {
++      // shouldn't happen....
++      return;
++    }
++
++    Matcher mat = null;
++
++    try {
++      String str = in.readLine();
++      while (str != null) {
++        mat = PROCFS_MEMFILE_FORMAT.matcher(str);
++        if (mat.find()) {
++          if (mat.group(1).equals(MEMTOTAL_STRING)) {
++            ramSize = Long.parseLong(mat.group(2));
++          } else if (mat.group(1).equals(SWAPTOTAL_STRING)) {
++            swapSize = Long.parseLong(mat.group(2));
++          }
++        }
++        str = in.readLine();
++      }
++    } catch (IOException io) {
++      LOG.warn("Error reading the stream " + io);
++    } finally {
++      // Close the streams
++      try {
++        fReader.close();
++        try {
++          in.close();
++        } catch (IOException i) {
++          LOG.warn("Error closing the stream " + in);
++        }
++      } catch (IOException i) {
++        LOG.warn("Error closing the stream " + fReader);
++      }
++    }
++
++    readMemInfoFile = true;
++  }
++
++  /** {@inheritDoc} */
++  @Override
++  public long getPhysicalMemorySize() {
++    readProcMemInfoFile();
++    return ramSize;
++  }
++
++  /** {@inheritDoc} */
++  @Override
++  public long getVirtualMemorySize() {
++    readProcMemInfoFile();
++    return ramSize + swapSize;
++  }
++
++  /**
++   * Test the {@link LinuxMemoryCalculatorPlugin}
++   * 
++   * @param args
++   */
++  public static void main(String[] args) {
++    LinuxMemoryCalculatorPlugin plugin = new LinuxMemoryCalculatorPlugin();
++    System.out.println("Physical memory Size : "
++        + plugin.getPhysicalMemorySize());
++    System.out.println("Total Virtual memory Size : "
++        + plugin.getVirtualMemorySize());
++  }
++}
+Index: src/mapred/org/apache/hadoop/mapred/JobInProgress.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/JobInProgress.java	(revision 720747)
++++ src/mapred/org/apache/hadoop/mapred/JobInProgress.java	(working copy)
+@@ -150,6 +150,7 @@
+   private boolean hasSpeculativeReduces;
+   private long inputLength = 0;
+   private long maxVirtualMemoryForTask;
++  private long maxPhysicalMemoryForTask;
+   
+   // Per-job counters
+   public static enum Counter { 
+@@ -245,7 +246,8 @@
+     this.nonRunningReduces = new LinkedList<TaskInProgress>();    
+     this.runningReduces = new LinkedHashSet<TaskInProgress>();
+     this.resourceEstimator = new ResourceEstimator(this);
+-    this.maxVirtualMemoryForTask = conf.getMaxVirtualMemoryForTask();
++    setMaxVirtualMemoryForTask(conf.getMaxVirtualMemoryForTask());
++    setMaxPhysicalMemoryForTask(conf.getMaxPhysicalMemoryForTask());
+   }
+ 
+   /**
+@@ -536,7 +538,19 @@
+   public long getMaxVirtualMemoryForTask() {
+     return maxVirtualMemoryForTask;
+   }
+-  
++
++  public void setMaxVirtualMemoryForTask(long maxVMem) {
++    maxVirtualMemoryForTask = maxVMem;
++  }
++
++  public long getMaxPhysicalMemoryForTask() {
++    return maxPhysicalMemoryForTask;
++  }
++
++  public void setMaxPhysicalMemoryForTask(long maxPMem) {
++    maxPhysicalMemoryForTask = maxPMem;
++  }
++
+   // Update the job start/launch time (upon restart) and log to history
+   synchronized void updateJobInfo(long startTime, long launchTime, int count) {
+     // log and change to the job's start/launch time
+Index: src/mapred/org/apache/hadoop/mapred/TaskTrackerManager.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/TaskTrackerManager.java	(revision 720747)
++++ src/mapred/org/apache/hadoop/mapred/TaskTrackerManager.java	(working copy)
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.hadoop.mapred;
+ 
++import java.io.IOException;
+ import java.util.Collection;
+ 
+ /**
+@@ -70,5 +71,21 @@
+    * @return the heartbeat interval used by {@link TaskTracker}s
+    */
+   public int getNextHeartbeatInterval();
+-  
++
++  /**
++   * Kill the job identified by jobid
++   * 
++   * @param jobid
++   * @throws IOException
++   */
++  public void killJob(JobID jobid)
++      throws IOException;
++
++  /**
++   * Obtain the job object identified by jobid
++   * 
++   * @param jobid
++   * @return jobInProgress object
++   */
++  public JobInProgress getJob(JobID jobid);
+ }
+Index: src/mapred/org/apache/hadoop/mapred/JvmManager.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/JvmManager.java	(revision 720747)
++++ src/mapred/org/apache/hadoop/mapred/JvmManager.java	(working copy)
+@@ -291,7 +291,7 @@
+       if (tracker.isTaskMemoryManagerEnabled()) {
+         tracker.getTaskMemoryManager().addTask(
+             TaskAttemptID.forName(env.conf.get("mapred.task.id")),
+-            tracker.getMemoryForTask(env.conf));
++            tracker.getVirtualMemoryForTask(env.conf));
+       }
+       setRunningTaskForJvm(jvmRunner.jvmId, t);
+       LOG.info(jvmRunner.getName());
+Index: src/mapred/org/apache/hadoop/mapred/TaskTracker.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/TaskTracker.java	(revision 720747)
++++ src/mapred/org/apache/hadoop/mapred/TaskTracker.java	(working copy)
+@@ -76,6 +76,7 @@
+ import org.apache.hadoop.net.DNS;
+ import org.apache.hadoop.net.NetUtils;
+ import org.apache.hadoop.util.DiskChecker;
++import org.apache.hadoop.util.MemoryCalculatorPlugin;
+ import org.apache.hadoop.util.ProcfsBasedProcessTree;
+ import org.apache.hadoop.util.ReflectionUtils;
+ import org.apache.hadoop.util.RunJar;
+@@ -186,10 +187,31 @@
+   
+   private TaskMemoryManagerThread taskMemoryManager;
+   private boolean taskMemoryManagerEnabled = false;
+-  private long maxVirtualMemoryForTasks 
+-                                    = JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
+-  
++  private long totalVirtualMemoryOnTT = JobConf.DISABLED_MEMORY_LIMIT;
++  private long totalPhysicalMemoryOnTT = JobConf.DISABLED_MEMORY_LIMIT;
++  private long reservedVirtualMemory = JobConf.DISABLED_MEMORY_LIMIT;
++  private long reservedPhysicalMemory = JobConf.DISABLED_MEMORY_LIMIT;
++
++  // Cluster wide default value for max-vm per task
++  private long defaultMaxVmPerTask = JobConf.DISABLED_MEMORY_LIMIT;
++  // Cluster wide upper limit on max-vm per task
++  private long limitMaxVmPerTask = JobConf.DISABLED_MEMORY_LIMIT;
++
+   /**
++   * Configuration property to specify the amount of virtual memory reserved on
++   * the TaskTracker for system usage (OS, TT etc).
++   */
++  static final String MAPRED_TASKTRACKER_VIRTUALMEMORY_RESERVED_PROPERTY =
++      "mapred.tasktracker.virtualmemory.reserved";
++
++  /**
++   * Configuration property to specify the amount of physical memory reserved on
++   * the TaskTracker for system usage (OS, TT etc).
++   */
++  static final String MAPRED_TASKTRACKER_PHSYICALMEMORY_RESERVED_PROPERTY =
++      "mapred.tasktracker.physicalmemory.reserved";
++
++  /**
+    * the minimum interval between jobtracker polls
+    */
+   private volatile int heartbeatInterval = HEARTBEAT_INTERVAL_MIN;
+@@ -460,17 +482,11 @@
+                              "Map-events fetcher for all reduce tasks " + "on " + 
+                              taskTrackerName);
+     mapEventsFetcher.start();
+-    maxVirtualMemoryForTasks = fConf.
+-                                  getLong("mapred.tasktracker.tasks.maxmemory",
+-                                          JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT);
++
++    initializeMemoryManagement();
++
+     this.indexCache = new IndexCache(this.fConf);
+-    // start the taskMemoryManager thread only if enabled
+-    setTaskMemoryManagerEnabledFlag();
+-    if (isTaskMemoryManagerEnabled()) {
+-      taskMemoryManager = new TaskMemoryManagerThread(this);
+-      taskMemoryManager.setDaemon(true);
+-      taskMemoryManager.start();
+-    }
++
+     mapLauncher = new TaskLauncher(maxCurrentMapTasks);
+     reduceLauncher = new TaskLauncher(maxCurrentReduceTasks);
+     mapLauncher.start();
+@@ -1138,13 +1154,14 @@
+     }
+     if (askForNewTask) {
+       checkLocalDirs(fConf.getLocalDirs());
++      TaskTrackerStatus.ResourceStatus resourceStatus = status.getResourceStatus();
+       askForNewTask = enoughFreeSpace(localMinSpaceStart);
+-      status.getResourceStatus().setAvailableSpace( getFreeSpace() );
+-      long freeVirtualMem = findFreeVirtualMemory();
+-      LOG.debug("Setting amount of free virtual memory for the new task: " +
+-                    freeVirtualMem);
+-      status.getResourceStatus().setFreeVirtualMemory(freeVirtualMem);
+-      status.getResourceStatus().setTotalMemory(maxVirtualMemoryForTasks);
++      resourceStatus.setAvailableSpace( getFreeSpace() );
++
++      resourceStatus.setTotalVirtualMemory(getTotalVirtualMemoryOnTT());
++      resourceStatus.setTotalPhysicalMemory(getTotalPhysicalMemoryOnTT());
++      resourceStatus.setReservedVirtualMemory(getReservedVirtualMemory());
++      resourceStatus.setReservedPhysicalMemory(getReservedPhysicalMemory());
+     }
+       
+     //
+@@ -1192,67 +1209,67 @@
+   }
+ 
+   /**
+-   * Return the maximum amount of memory available for all tasks on 
+-   * this tracker
+-   * @return maximum amount of virtual memory
++   * Return the total virtual memory available on this TaskTracker.
++   * @return total size of virtual memory.
+    */
+-  long getMaxVirtualMemoryForTasks() {
+-    return maxVirtualMemoryForTasks;
++  long getTotalVirtualMemoryOnTT() {
++    return totalVirtualMemoryOnTT;
+   }
+-  
++
+   /**
+-   * Find the minimum amount of virtual memory that would be
+-   * available for a new task.
+-   * 
+-   * The minimum amount of virtual memory is computed by looking
+-   * at the maximum amount of virtual memory that is allowed for
+-   * all tasks in the system, as per mapred.tasktracker.tasks.maxmemory,
+-   * and the total amount of maximum virtual memory that can be
+-   * used by all currently running tasks.
+-   * 
+-   * @return amount of free virtual memory that can be assured for
+-   * new tasks
++   * Return the total physical memory available on this TaskTracker.
++   * @return total size of physical memory.
+    */
+-  private synchronized long findFreeVirtualMemory() {
+-  
+-    if (maxVirtualMemoryForTasks == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
+-      // this will disable picking up tasks based on free memory.
+-      return JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
+-    }
+-  
+-    long maxMemoryUsed = 0L;
+-    for (TaskInProgress tip: runningTasks.values()) {
+-      // the following task states are one in which the slot is
+-      // still occupied and hence memory of the task should be
+-      // accounted in used memory.
+-      if ((tip.getRunState() == TaskStatus.State.RUNNING)
+-            || (tip.getRunState() == TaskStatus.State.COMMIT_PENDING)) {
+-        maxMemoryUsed += getMemoryForTask(tip.getJobConf());
+-      }
+-    }
+-  
+-    return (maxVirtualMemoryForTasks - maxMemoryUsed);
++  long getTotalPhysicalMemoryOnTT() {
++    return totalPhysicalMemoryOnTT;
+   }
+ 
+   /**
+-   * Return the memory allocated for a TIP.
++   * Return the amount of virtual memory reserved on the TaskTracker for system
++   * usage (OS, TT etc).
++   */
++  long getReservedVirtualMemory() {
++    return reservedVirtualMemory;
++  }
++
++  /**
++   * Return the amount of physical memory reserved on the TaskTracker for system
++   * usage (OS, TT etc).
++   */
++  long getReservedPhysicalMemory() {
++    return reservedPhysicalMemory;
++  }
++
++  /**
++   * Return the limit on the maxVMemPerTask on this TaskTracker
++   * @return limitMaxVmPerTask
++   */
++  long getLimitMaxVMemPerTask() {
++    return limitMaxVmPerTask;
++  }
++
++  /**
++   * Obtain the virtual memory allocated for a TIP.
+    * 
+-   * If the TIP's job has a configured value for the max memory that is
+-   * returned. Else, the default memory that would be assigned for the
+-   * task is returned.
++   * If the TIP's job has a configured value for the max-virtual memory, that
++   * will be returned. Else, the cluster-wide default maxvirtual memory for
++   * tasks is returned.
++   * 
+    * @param conf
+-   * @return the memory allocated for the TIP.
++   * @return the virtual memory allocated for the TIP.
+    */
+-  long getMemoryForTask(JobConf conf) {
+-    long memForTask = conf.getMaxVirtualMemoryForTask();
+-    if (memForTask == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
+-      memForTask = fConf.getLong("mapred.task.default.maxmemory",
+-                          512*1024*1024L);
++  long getVirtualMemoryForTask(JobConf conf) {
++    long vMemForTask =
++        normalizeMemoryConfigValue(conf.getMaxVirtualMemoryForTask());
++    if (vMemForTask == JobConf.DISABLED_MEMORY_LIMIT) {
++      vMemForTask =
++          normalizeMemoryConfigValue(fConf.getLong(
++              JobConf.MAPRED_TASK_DEFAULT_MAXVM_PROPERTY,
++              JobConf.DISABLED_MEMORY_LIMIT));
+     }
+-    return memForTask;
+-  }  
+-  
+-  
++    return vMemForTask;
++  }
++
+   /**
+    * Check if the jobtracker directed a 'reset' of the tasktracker.
+    * 
+@@ -1634,7 +1651,7 @@
+       localizeJob(tip);
+       if (isTaskMemoryManagerEnabled()) {
+         taskMemoryManager.addTask(tip.getTask().getTaskID(), 
+-            getMemoryForTask(tip.getJobConf()));
++            getVirtualMemoryForTask(tip.getJobConf()));
+       }
+     } catch (Throwable e) {
+       String msg = ("Error initializing " + tip.getTask().getTaskID() + 
+@@ -2931,6 +2948,70 @@
+     return taskMemoryManager;
+   }
+ 
++  /**
++   * Normalize the negative values in configuration
++   * 
++   * @param val
++   * @return normalized val
++   */
++  private long normalizeMemoryConfigValue(long val) {
++    if (val < 0) {
++      val = JobConf.DISABLED_MEMORY_LIMIT;
++    }
++    return val;
++  }
++
++  /**
++   * Memory-related setup
++   */
++  private void initializeMemoryManagement() {
++    MemoryCalculatorPlugin memoryCalculatorPlugin =
++        MemoryCalculatorPlugin.getMemoryCalculatorPlugin(fConf);
++    LOG.info(" Using MemoryCalculatorPlugin : " + memoryCalculatorPlugin);
++    if (memoryCalculatorPlugin != null) {
++      totalVirtualMemoryOnTT = memoryCalculatorPlugin.getVirtualMemorySize();
++      if (totalVirtualMemoryOnTT <= 0) {
++        LOG.warn("TaskTracker's totalVmem could not be calculated. "
++            + "Setting it to " + JobConf.DISABLED_MEMORY_LIMIT);
++        totalVirtualMemoryOnTT = JobConf.DISABLED_MEMORY_LIMIT;
++      }
++      totalPhysicalMemoryOnTT = memoryCalculatorPlugin.getPhysicalMemorySize();
++      if (totalPhysicalMemoryOnTT <= 0) {
++        LOG.warn("TaskTracker's totalPmem could not be calculated. "
++            + "Setting it to " + JobConf.DISABLED_MEMORY_LIMIT);
++        totalPhysicalMemoryOnTT = JobConf.DISABLED_MEMORY_LIMIT;
++      }
++    }
++
++    reservedVirtualMemory =
++        normalizeMemoryConfigValue(fConf.getLong(
++            TaskTracker.MAPRED_TASKTRACKER_VIRTUALMEMORY_RESERVED_PROPERTY,
++            JobConf.DISABLED_MEMORY_LIMIT));
++
++    reservedPhysicalMemory =
++        normalizeMemoryConfigValue(fConf.getLong(
++            TaskTracker.MAPRED_TASKTRACKER_PHSYICALMEMORY_RESERVED_PROPERTY,
++            JobConf.DISABLED_MEMORY_LIMIT));
++
++    defaultMaxVmPerTask =
++        normalizeMemoryConfigValue(fConf.getLong(
++            JobConf.MAPRED_TASK_DEFAULT_MAXVM_PROPERTY,
++            JobConf.DISABLED_MEMORY_LIMIT));
++
++    limitMaxVmPerTask =
++        normalizeMemoryConfigValue(fConf.getLong(
++            JobConf.UPPER_LIMIT_ON_TASK_VMEM_PROPERTY,
++            JobConf.DISABLED_MEMORY_LIMIT));
++
++    // start the taskMemoryManager thread only if enabled
++    setTaskMemoryManagerEnabledFlag();
++    if (isTaskMemoryManagerEnabled()) {
++      taskMemoryManager = new TaskMemoryManagerThread(this);
++      taskMemoryManager.setDaemon(true);
++      taskMemoryManager.start();
++    }
++  }
++
+   private void setTaskMemoryManagerEnabledFlag() {
+     if (!ProcfsBasedProcessTree.isAvailable()) {
+       LOG.info("ProcessTree implementation is missing on this system. "
+@@ -2939,14 +3020,44 @@
+       return;
+     }
+ 
+-    Long tasksMaxMem = getMaxVirtualMemoryForTasks();
+-    if (tasksMaxMem == JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT) {
+-      LOG.info("TaskTracker's tasksMaxMem is not set. TaskMemoryManager is "
+-          + "disabled.");
++    long totalVmemOnTT = getTotalVirtualMemoryOnTT();
++    if (totalVmemOnTT == JobConf.DISABLED_MEMORY_LIMIT) {
++      LOG.info("TaskTracker's totalVmem could not be calculated. "
++          + "TaskMemoryManager is disabled.");
+       taskMemoryManagerEnabled = false;
+       return;
+     }
+ 
++    long reservedVmem = getReservedVirtualMemory();
++    if (reservedVmem == JobConf.DISABLED_MEMORY_LIMIT) {
++      LOG.info("TaskTracker's reservedVmem is not configured. "
++          + "TaskMemoryManager is disabled.");
++      taskMemoryManagerEnabled = false;
++      return;
++    }
++
++    if (defaultMaxVmPerTask == JobConf.DISABLED_MEMORY_LIMIT) {
++      LOG.info("TaskTracker's defaultMaxVmPerTask is not configured. "
++          + "TaskMemoryManager is disabled.");
++      taskMemoryManagerEnabled = false;
++      return;
++    }
++
++    if (limitMaxVmPerTask == JobConf.DISABLED_MEMORY_LIMIT) {
++      LOG.info("TaskTracker's limitMaxVmPerTask is not configured. "
++          + "TaskMemoryManager is disabled.");
++      taskMemoryManagerEnabled = false;
++      return;
++    }
++
++    if (defaultMaxVmPerTask > limitMaxVmPerTask) {
++      LOG.info("defaultMaxVmPerTask is mis-configured. "
++          + "It shouldn't be greater than limitMaxVmPerTask. "
++          + "TaskMemoryManager is disabled.");
++      taskMemoryManagerEnabled = false;
++      return;
++    }
++
+     taskMemoryManagerEnabled = true;
+   }
+ 
+Index: src/mapred/org/apache/hadoop/mapred/JobConf.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/JobConf.java	(revision 720747)
++++ src/mapred/org/apache/hadoop/mapred/JobConf.java	(working copy)
+@@ -108,14 +108,32 @@
+    * A value which if set for memory related configuration options,
+    * indicates that the options are turned off.
+    */
+-  static final long DISABLED_VIRTUAL_MEMORY_LIMIT = -1L;
++  static final long DISABLED_MEMORY_LIMIT = -1L;
+   
+   /**
+    * Name of the queue to which jobs will be submitted, if no queue
+    * name is mentioned.
+    */
+   public static final String DEFAULT_QUEUE_NAME = "default";
+-  
++
++  static final String MAPRED_TASK_DEFAULT_MAXVM_PROPERTY =
++      "mapred.task.default.maxvm";
++
++  static final String MAPRED_TASK_MAXMEMORY_PROPERTY =
++      "mapred.task.maxmemory";
++
++  static String MAPRED_TASK_MAXPHYSICALMEMORY_PROPERTY =
++      "mapred.task.maxphysicalmemory";
++
++  static String DEFAULT_PERCENTAGE_OF_PMEM_IN_VMEM_PROPERTY =
++      "mapred.task.default-pmem-percentage-in-vmem";
++
++  static final String UPPER_LIMIT_ON_TASK_VMEM_PROPERTY =
++      "mapred.task.limit.maxvm";
++
++  static final String UPPER_LIMIT_ON_TASK_PMEM_PROPERTY =
++      "mapred.task.limit.maxpm";
++
+   /**
+    * Construct a map/reduce job configuration.
+    */
+@@ -1348,34 +1366,81 @@
+   /**
+    * The maximum amount of memory any task of this job will use.
+    * 
+-   * A task of this job will be scheduled on a tasktracker, only if the
+-   * amount of free memory on the tasktracker is greater than 
+-   * or equal to this value.
+-   * 
+-   * If set to {@link #DISABLED_VIRTUAL_MEMORY_LIMIT}, tasks are assured 
+-   * a memory limit set to mapred.task.default.maxmemory. If the value of
+-   * mapred.tasktracker.tasks.maxmemory is set to -1, this value is 
+-   * ignored.
+-   * 
+-   * @return The maximum amount of memory any task of this job will use, in kilobytes.
+-   * @see #getMaxVirtualMemoryForTasks()
++   * @return The maximum amount of memory any task of this job will use, in
++   *         kilobytes.
++   * @see #setMaxVirtualMemoryForTask(long)
+    */
+   long getMaxVirtualMemoryForTask() {
+-    return getLong("mapred.task.maxmemory", DISABLED_VIRTUAL_MEMORY_LIMIT);
++    return getLong(JobConf.MAPRED_TASK_MAXMEMORY_PROPERTY,
++        DISABLED_MEMORY_LIMIT);
+   }
+-  
++
+   /**
+    * Set the maximum amount of memory any task of this job can use.
+    * 
+-   * @param vmem Maximum amount of memory in kilobytes any task of this job 
+-   * can use.
++   * This value will be used TaskTrackers for monitoring the memory usage of
++   * tasks of this jobs. If a TaskTracker's memory management functionality is
++   * enabled, each task of this job will be allowed to use a maximum virtual
++   * memory specified by this property. If the task's memory usage goes over
++   * this, the task will be failed by the TT. If set to
++   * {@link #DISABLED_MEMORY_LIMIT}, tasks are assured a memory limit set to
++   * {@link JobConf#MAPRED_TASKS_DEFAULT_MAXMEM_PROPERTY}. The later is a cluster-wide
++   * configuration and if that is also set to {@link #DISABLED_MEMORY_LIMIT},
++   * task will not be assured anything and may be killed by a TT depending upon
++   * the total memory usage on the TT. If the memory management functionality is
++   * disabled on a TT, this value is ignored.
++   * 
++   * This value may also be used by schedulers that support scheduling based on
++   * job's memory requirements, for e.g., @{link {@link CapacityTaskScheduler}.
++   * In general, a task of this job will be scheduled on a tasktracker, only if
++   * the amount of virtual memory still unoccupied on the tasktracker is greater
++   * than or equal to this value. But different schedulers can take different
++   * decisions.
++   * 
++   * @param vmem Maximum amount of virtual memory in kilobytes any task of this job can
++   *          use.
+    * @see #getMaxVirtualMemoryForTask()
+    */
+-  void setMaxVirtualMemoryForTask(long vmem) {
+-    setLong("mapred.task.maxmemory", vmem);
++  void setMaxVirtualMemoryForTask(long pmem) {
++    setLong(JobConf.MAPRED_TASK_MAXMEMORY_PROPERTY, pmem);
+   }
+-  
++
+   /**
++   * The maximum amount of physical memory any task of this job will use.
++   * 
++   * @return The maximum amount of physical memory any task of this job will
++   *         use, in kilobytes.
++   * @see #setMaxPhysicalMemoryForTask(long)
++   */
++  long getMaxPhysicalMemoryForTask() {
++    return getLong(JobConf.MAPRED_TASK_MAXPHYSICALMEMORY_PROPERTY,
++        DISABLED_MEMORY_LIMIT);
++  }
++
++  /**
++   * Set the maximum amount of physical memory any task of this job can use.
++   * 
++   * If set to {@link #DISABLED_MEMORY_LIMIT}, this configuration will be
++   * calculated as a percentage (the cluster-wide configuration
++   * {@link JobConf#DEFAULT_PERCENTAGE_OF_PMEM_IN_VMEM_PROPERTY}) of the job's
++   * virtual memory requirements ({@link #getMaxVirtualMemoryForTask()} )
++   * 
++   * This value may be used by schedulers that support scheduling based on job's
++   * memory requirements, for e.g., @{link {@link CapacityTaskScheduler}. In
++   * general, a task of this job will be scheduled on a tasktracker, only if the
++   * amount of physical memory still unoccupied on the tasktracker is greater
++   * than or equal to this value. But different schedulers can take different
++   * decisions.
++   * 
++   * @param pmem Maximum amount of physical memory in kilobytes any task of this
++   *          job can use.
++   * @see #getMaxPhysicalMemoryForTask()
++   */
++  void setMaxPhysicalMemoryForTask(long pmem) {
++    setLong(JobConf.MAPRED_TASK_MAXPHYSICALMEMORY_PROPERTY, pmem);
++  }
++
++  /**
+    * Return the name of the queue to which this job is submitted.
+    * Defaults to 'default'.
+    * 
+Index: src/mapred/org/apache/hadoop/mapred/TaskMemoryManagerThread.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/TaskMemoryManagerThread.java	(revision 720747)
++++ src/mapred/org/apache/hadoop/mapred/TaskMemoryManagerThread.java	(working copy)
+@@ -60,7 +60,9 @@
+     tasksToBeAdded = new HashMap<TaskAttemptID, ProcessTreeInfo>();
+     tasksToBeRemoved = new ArrayList<TaskAttemptID>();
+ 
+-    maxMemoryAllowedForAllTasks = taskTracker.getMaxVirtualMemoryForTasks();
++    maxMemoryAllowedForAllTasks =
++        taskTracker.getTotalVirtualMemoryOnTT()
++            - taskTracker.getReservedVirtualMemory();
+ 
+     monitoringInterval = taskTracker.getJobConf().getLong(
+         "mapred.tasktracker.taskmemorymanager.monitoring-interval", 5000L);
+@@ -72,9 +74,6 @@
+   public void addTask(TaskAttemptID tid, long memLimit) {
+     synchronized (tasksToBeAdded) {
+       LOG.debug("Tracking ProcessTree " + tid + " for the first time");
+-      // TODO: Negative values must have been checked in JobConf.
+-      memLimit = (memLimit < 0 ? JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT
+-          : memLimit);
+       ProcessTreeInfo ptInfo = new ProcessTreeInfo(tid, null, null, memLimit,
+           sleepTimeBeforeSigKill);
+       tasksToBeAdded.put(tid, ptInfo);
+@@ -205,7 +204,18 @@
+         LOG.info("Memory usage of ProcessTree " + pId + " :" + currentMemUsage
+             + "kB. Limit : " + limit + "kB");
+ 
+-        if (limit != JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT
++        if (limit > taskTracker.getLimitMaxVMemPerTask()) {
++          // TODO: I'm not at all comfortable with this. With monitoring enabled
++          // and no scheduling based on memory, users can seriously hijack the
++          // system by specifying memory requirements well above the cluster
++          // wide limit. Ideally these jobs should have been rejected by
++          // JT/scheduler. Because we can't do that, in the minimum we should
++          // fail the tasks and hence the job.
++          LOG.warn("Task " + tid
++              + " 's maxVmemPerTask is greater than TT's limitMaxVmPerTask");
++        }
++
++        if (limit != JobConf.DISABLED_MEMORY_LIMIT
+             && currentMemUsage > limit) {
+           // Task (the root process) is still alive and overflowing memory.
+           // Clean up.
+Index: src/mapred/org/apache/hadoop/mapred/TaskTrackerStatus.java
+===================================================================
+--- src/mapred/org/apache/hadoop/mapred/TaskTrackerStatus.java	(revision 720747)
++++ src/mapred/org/apache/hadoop/mapred/TaskTrackerStatus.java	(working copy)
+@@ -54,59 +54,102 @@
+    */
+   static class ResourceStatus implements Writable {
+     
+-    private long freeVirtualMemory;
+-    private long totalMemory;
++    private long totalVirtualMemory;
++    private long reservedVirtualMemory;
++    private long totalPhysicalMemory;
++    private long reservedPhysicalMemory;
+     private long availableSpace;
+     
+     ResourceStatus() {
+-      freeVirtualMemory = JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
+-      totalMemory = JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT;
++      totalVirtualMemory = JobConf.DISABLED_MEMORY_LIMIT;
++      reservedVirtualMemory = JobConf.DISABLED_MEMORY_LIMIT;
++      totalPhysicalMemory = JobConf.DISABLED_MEMORY_LIMIT;
++      reservedPhysicalMemory = JobConf.DISABLED_MEMORY_LIMIT;
+       availableSpace = Long.MAX_VALUE;
+     }
+-    
++
+     /**
+-     * Set the amount of free virtual memory that is available for running
+-     * a new task
+-     * @param freeVMem amount of free virtual memory in kilobytes
++     * Set the maximum amount of virtual memory on the tasktracker.
++     * 
++     * @param vmem maximum amount of virtual memory on the tasktracker in
++     *          kilobytes.
+      */
+-    void setFreeVirtualMemory(long freeVmem) {
+-      freeVirtualMemory = freeVmem;
++    void setTotalVirtualMemory(long totalMem) {
++      totalVirtualMemory = totalMem;
+     }
+ 
+     /**
+-     * Get the amount of free virtual memory that will be available for
+-     * running a new task. 
++     * Get the maximum amount of virtual memory on the tasktracker.
+      * 
+-     * If this is {@link JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT}, it should 
+-     * be ignored and not used in computation.
++     * If this is {@link JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT}, it should be
++     * ignored and not used in any computation.
+      * 
+-     *@return amount of free virtual memory in kilobytes.
++     * @return the maximum amount of virtual memory on the tasktracker in
++     *         kilobytes.
+      */
+-    long getFreeVirtualMemory() {
+-      return freeVirtualMemory;
++    long getTotalVirtualMemory() {
++      return totalVirtualMemory;
+     }
+ 
+     /**
+-     * Set the maximum amount of virtual memory on the tasktracker.
+-     * @param vmem maximum amount of virtual memory on the tasktracker in kilobytes.
++     * Set the amount of virtual memory reserved on the TaskTracker for system
++     * usage (OS, TT etc).
++     * 
++     * @param reservedVmem amount of virtual memory reserved in kilobytes.
+      */
+-    void setTotalMemory(long totalMem) {
+-      totalMemory = totalMem;
++    void setReservedVirtualMemory(long reservedVmem) {
++      reservedVirtualMemory = reservedVmem;
+     }
+-    
++
+     /**
+-     * Get the maximum amount of virtual memory on the tasktracker.
++     * Get the amount of virtual memory reserved on the TaskTracker for system
++     * usage (OS, TT etc).
++     */
++    long getReservedTotalMemory() {
++      return reservedVirtualMemory;
++    }
++
++    /**
++     * Set the maximum amount of physical memory on the tasktracker.
+      * 
+-     * If this is
+-     * {@link JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT}, it should be ignored 
+-     * and not used in any computation.
++     * @param totalRAM maximum amount of physical memory on the tasktracker in
++     *          kilobytes.
++     */
++    void setTotalPhysicalMemory(long totalRAM) {
++      totalPhysicalMemory = totalRAM;
++    }
++
++    /**
++     * Get the maximum amount of physical memory on the tasktracker.
+      * 
+-     * @return maximum amount of virtual memory on the tasktracker in kilobytes. 
+-     */    
+-    long getTotalMemory() {
+-      return totalMemory;
++     * If this is {@link JobConf.DISABLED_VIRTUAL_MEMORY_LIMIT}, it should be
++     * ignored and not used in any computation.
++     * 
++     * @return maximum amount of physical memory on the tasktracker in
++     *         kilobytes.
++     */
++    long getTotalPhysicalMemory() {
++      return totalPhysicalMemory;
+     }
+-    
++
++    /**
++     * Set the amount of physical memory reserved on the TaskTracker for system
++     * usage (OS, TT etc).
++     * 
++     * @param reservedPmem amount of physical memory reserved in kilobytes.
++     */
++    void setReservedPhysicalMemory(long reservedPmem) {
++      reservedPhysicalMemory = reservedPmem;
++    }
++
++    /**
++     * Get the amount of physical memory reserved on the TaskTracker for system
++     * usage (OS, TT etc).
++     */
++    long getReservedPhysicalMemory() {
++      return reservedPhysicalMemory;
++    }
++
+     void setAvailableSpace(long availSpace) {
+       availableSpace = availSpace;
+     }
+@@ -120,15 +163,19 @@
+     }
+     
+     public void write(DataOutput out) throws IOException {
+-      WritableUtils.writeVLong(out, freeVirtualMemory);
+-      WritableUtils.writeVLong(out, totalMemory);
++      WritableUtils.writeVLong(out, totalVirtualMemory);
++      WritableUtils.writeVLong(out, reservedVirtualMemory);
++      WritableUtils.writeVLong(out, totalPhysicalMemory);
++      WritableUtils.writeVLong(out, reservedPhysicalMemory);
+       WritableUtils.writeVLong(out, availableSpace);
+     }
+     
+     public void readFields(DataInput in) throws IOException {
+-      freeVirtualMemory = WritableUtils.readVLong(in);;
+-      totalMemory = WritableUtils.readVLong(in);;
+-      availableSpace = WritableUtils.readVLong(in);;
++      totalVirtualMemory = WritableUtils.readVLong(in);
++      reservedVirtualMemory = WritableUtils.readVLong(in);
++      totalPhysicalMemory = WritableUtils.readVLong(in);
++      reservedPhysicalMemory = WritableUtils.readVLong(in);
++      availableSpace = WritableUtils.readVLong(in);
+     }
+   }
+   
