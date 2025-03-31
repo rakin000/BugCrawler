@@ -1,1 +1,1 @@
-Your GPT API KEY
+Your API KEY
