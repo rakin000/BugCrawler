@@ -1,7 +1,7 @@
 import openai
 import base64
 
-API_KEY_PATH = '/Users/qwb/Desktop/Distributed System Research/Furina/Tools/bug_crawler/config/gpt/api_key.txt'
+API_KEY_PATH = '/bug_crawler/config/gpt/your_key.txt'
 
 with open(API_KEY_PATH, 'r') as f:
     API_KEY = f.read()
