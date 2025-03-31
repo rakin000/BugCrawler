@@ -11,13 +11,13 @@
 Execute the following command to start the crawler:
 
 ```bash
-python run.py
+python bug_crawler/run.py
 ```
 
 Upon successful execution, the results will be generated in the directory:
 
 ```
-./result/xxx.xlsx
+./bug_crawler/result/xxx.xlsx
 ```
 
 ------
@@ -54,7 +54,7 @@ After customization, ensure your configuration file is properly referenced in `r
 - **Attachment Management**: Automatically download specified attachment types (such as `.log` files) and store them systematically in:
 
   ```
-  ./bug_cases/logs
+  ./bug_crawler/bug_cases/logs
   ```
 
 - **Resume Capability**: Supports breakpoint resume functionality if the crawling process is interrupted.
