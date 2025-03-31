@@ -2,8 +2,6 @@
 
 **Bug Crawler** is an automated tool designed to efficiently collect and organize bug cases from the Apache community.
 
-------
-
 ## Quick Start
 
 ### Run the Tool
@@ -19,8 +17,6 @@ Upon successful execution, the results will be generated in the directory:
 ```
 ./bug_crawler/result/xxx.xlsx
 ```
-
-------
 
 ## Configuration
 
@@ -44,8 +40,6 @@ You can adjust parameters such as:
 - **Attachment File Type** (e.g., `.log`)
 
 After customization, ensure your configuration file is properly referenced in `run.py`.
-
-------
 
 ## Key Features
 
@@ -71,8 +65,6 @@ Prompt templates are customizable and located at:
 ./bug_crawler/prompt_template/xxx.txt
 ```
 
-------
-
 ## Directory Structure Overview
 
 ```
@@ -88,8 +80,6 @@ result/
 └── xxx.xlsx
 run.py
 ```
-
-------
 
 ## Requirements
 
