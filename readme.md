@@ -38,6 +38,7 @@ You can adjust parameters such as:
 - **Bug Type** (e.g., memory, network)
 - **Maximum Total Issues**
 - **Attachment File Type** (e.g., `.log`)
+- ...
 
 After customization, ensure your configuration file is properly referenced in `run.py`.
 
