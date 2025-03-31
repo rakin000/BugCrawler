@@ -74,11 +74,11 @@ bug_crawler/
 │       └── config.json
 ├── prompt_template/
 │   └── xxx.txt
+├── run.py
 bug_cases/
 └── logs/
 result/
 └── xxx.xlsx
-run.py
 ```
 
 ## Requirements
