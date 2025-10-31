@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import requests
 from tqdm import tqdm
@@ -14,18 +15,18 @@ def load_config(file):
 config_file = "config/memory_bug/config.json"
 config = load_config(config_file)
 
-# jira config
-JIRA_SEARCH_API = config["jira"]["search_api"]
-JIRA_ISSUE_DETAIL_API = config["jira"]["issue_detail_api"]
-JIRA_BROWSE_URL = config["jira"]["browse_url"]
-BUG_TYPE = config["jira"]["bug_type"]
-MAX_TOTAL_ISSUES = config["jira"]["max_total_issues"]
-PAGE_SIZE = config["jira"]["page_size"]
-MIN_LOG_LINE = config["jira"]["min_log_line"]
-SAVE_EVERY = config["jira"]["save_every"]
-ATTACHMENT_FILE_TYPES = config["jira"]["attachment_file_types"]
-GPT_MAX_ATTACHMENT_LINE = config["jira"]["gpt_max_attachment_line"]
-LOG_SAVE_PATH = config["jira"]["log_save_path"]
+# GitHub config (falls back to jira keys when appropriate)
+GITHUB_SEARCH_API = config.get("github", {}).get("search_api", "https://api.github.com/search/issues")
+GITHUB_TOKEN = config.get("github", {}).get("token")
+GITHUB_SEARCH_QUERY = config.get("github", {}).get("search_query", config.get("jira", {}).get("jql", ""))
+BUG_TYPE = config.get("github", {}).get("bug_type", config.get("jira", {}).get("bug_type"))
+MAX_TOTAL_ISSUES = config.get("github", {}).get("max_total_issues", config.get("jira", {}).get("max_total_issues", 500))
+PAGE_SIZE = config.get("github", {}).get("page_size", config.get("jira", {}).get("page_size", 50))
+MIN_LOG_LINE = config.get("github", {}).get("min_log_line", config.get("jira", {}).get("min_log_line", 10))
+SAVE_EVERY = config.get("github", {}).get("save_every", config.get("jira", {}).get("save_every", 10))
+ATTACHMENT_FILE_TYPES = config.get("github", {}).get("attachment_file_types", config.get("jira", {}).get("attachment_file_types", []))
+GPT_MAX_ATTACHMENT_LINE = config.get("github", {}).get("gpt_max_attachment_line", config.get("jira", {}).get("gpt_max_attachment_line", 2000))
+LOG_SAVE_PATH = config.get("github", {}).get("log_save_path", config.get("jira", {}).get("log_save_path", "bug_cases/logs/"))
 
 # excel config
 EXCEL_FILE = config["excel"]["file_name"].format(bug_type=BUG_TYPE)
@@ -39,71 +40,128 @@ PROMPT_QUESTION_FILE = [
     './prompt_template/question_calculate_process_memory_usage.txt'
     # './prompt_template/question_deduce_bug_root_cause.txt'
 ]
-QUESTIONS_FOR_GPT = [
-    open(prompt_template_file, 'r').read()
-    for prompt_template_file in PROMPT_QUESTION_FILE
-]
+QUESTIONS_FOR_GPT = [open(prompt_template_file, 'r').read() for prompt_template_file in PROMPT_QUESTION_FILE]
+
+# helper to build auth headers for GitHub
+HEADERS = {
+    "Accept": "application/vnd.github.v3+json"
+}
+if GITHUB_TOKEN:
+    HEADERS["Authorization"] = f"token {GITHUB_TOKEN}"
 
 def fetch_memory_bugs():
-    jql_query = config["jira"]["jql"].format(search_term=BUG_TYPE)
+    """Search GitHub issues using the configured query and return list of issue items.
 
-    start_at = 0
+    Returns a list of GitHub issue JSON objects from the search API.
+    """
+    query = GITHUB_SEARCH_QUERY or BUG_TYPE or ""
+    if not query:
+        raise ValueError("No GitHub search query or BUG_TYPE provided in config")
+
+    per_page = PAGE_SIZE
+    page = 1
     all_bugs = []
 
-    while start_at < MAX_TOTAL_ISSUES:
+    while len(all_bugs) < MAX_TOTAL_ISSUES:
         params = {
-            "jql": jql_query,
-            "startAt": start_at,
-            "maxResults": PAGE_SIZE
+            "q": query,
+            "per_page": per_page,
+            "page": page
         }
-
-        response = requests.get(JIRA_SEARCH_API, params=params)
+        response = requests.get(GITHUB_SEARCH_API, params=params, headers=HEADERS, timeout=15)
         response.raise_for_status()
         data = response.json()
 
-        issues = data.get("issues", [])
-        if not issues:
+        items = data.get("items", [])
+        if not items:
             break
 
-        all_bugs.extend(issues)
-        print(f"Fetched {len(issues)} issues (startAt={start_at})")
+        all_bugs.extend(items)
+        print(f"Fetched {len(items)} issues (page={page})")
 
-        start_at += PAGE_SIZE
-        if start_at >= data.get("total", 0):
+        # GitHub search provides total_count
+        if len(all_bugs) >= min(data.get("total_count", 0), MAX_TOTAL_ISSUES):
             break
 
-    return all_bugs
+        page += 1
+
+    return all_bugs[:MAX_TOTAL_ISSUES]
 
 
-def fetch_attachments_with_linecount(issue_key):
-    """返回 issue_key, [(attachment_link, line_count)]"""
-    url = f"{JIRA_ISSUE_DETAIL_API}{issue_key}"
+def _extract_urls_from_text(text):
+    if not text:
+        return []
+    # simple url extractor
+    urls = re.findall(r"(https?://[^\s)\]\"]+)", text)
+    return urls
+
+
+def fetch_attachments_with_linecount(issue_item):
+    """Given a GitHub issue search item (from search API), return (issue_key, [(attachment_link, file_name, line_count)])
+
+    We consider links in the issue body and comments as attachments. Filters by extension using ATTACHMENT_FILE_TYPES when provided.
+    """
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        attachments = data.get("fields", {}).get("attachment", [])
+        issue_api_url = issue_item.get("url")  # api URL for issue
+        repo_api_url = issue_item.get("repository_url")
+        number = issue_item.get("number")
+        repo_full = ""
+        if repo_api_url:
+            # repo_api_url looks like https://api.github.com/repos/owner/repo
+            repo_full = "/".join(repo_api_url.split("/")[-2:])
+        issue_key = f"{repo_full}#{number}" if repo_full else str(number)
+
+        # fetch issue details (to get body) and comments
         result = []
 
-        for att in attachments:
-            att_url = att["content"]
-            att_file_name = att['filename']
+        # Fetch issue details (body)
+        if issue_api_url:
+            resp = requests.get(issue_api_url, headers=HEADERS, timeout=10)
+            resp.raise_for_status()
+            issue_detail = resp.json()
+        else:
+            issue_detail = issue_item
+
+        body = issue_detail.get("body", "")
+        urls = set(_extract_urls_from_text(body))
+
+        # fetch comments
+        comments_url = issue_detail.get("comments_url")
+        if comments_url:
             try:
-                content_resp = requests.get(att_url, timeout=10)
+                c_resp = requests.get(comments_url, headers=HEADERS, timeout=10)
+                c_resp.raise_for_status()
+                comments = c_resp.json()
+                for c in comments:
+                    urls.update(_extract_urls_from_text(c.get("body", "")))
+            except Exception as e:
+                print(f"⚠️ Couldn't fetch comments for {issue_key}: {e}")
+
+        # Filter and fetch line counts
+        for url in sorted(urls):
+            file_name = Path(url).name.split("?")[0]
+            ext = Path(file_name).suffix.lstrip('.').lower()
+            # If ATTACHMENT_FILE_TYPES is non-empty, prefer those; else accept any link
+            if ATTACHMENT_FILE_TYPES and ext and ext not in ATTACHMENT_FILE_TYPES:
+                # skip non-interesting file types
+                continue
+
+            try:
+                content_resp = requests.get(url, headers=HEADERS, timeout=15)
                 content_resp.raise_for_status()
                 text = content_resp.text
                 line_count = len(text.strip().splitlines())
             except Exception as e:
-                print(f"⚠️ 附件无法获取：{att_url}，Error：{e}")
+                print(f"⚠️ 附件无法获取：{url}，Error：{e}")
                 line_count = "N/A"
 
-            result.append((att_url, att_file_name, line_count))
+            result.append((url, file_name or url, line_count))
 
         return issue_key, result
 
     except Exception as e:
-        print(f"❌ 获取 issue {issue_key} 附件失败: {e}")
-        return issue_key, []
+        print(f"❌ 获取 issue 附件失败: {e}")
+        return str(issue_item.get("number", "unknown")), []
 
 
 def load_written_issue_keys():
@@ -135,14 +193,23 @@ def save_to_excel_incremental(bugs, attachment_map, save_every=SAVE_EVERY):
     print("\n📄 增量写入 Excel 文件（每写入 {} 条自动保存）...\n".format(save_every))
 
     for bug in tqdm(bugs, desc="写入进度", ncols=100):
-        key = bug.get("key")
+        # The search results from GitHub have different shape. Use repository#number as key when possible.
+        repo_api = bug.get("repository_url")
+        number = bug.get("number")
+        if repo_api:
+            repo_full = "/".join(repo_api.split("/")[-2:])
+            key = f"{repo_full}#{number}"
+        else:
+            # fallback to html_url
+            key = bug.get("html_url") or f"{bug.get('id')}"
         # skip lines that are already written
         if key in written_keys:
             print(f"Case {key} already exists in Excel. Skipping write operation to Excel.")
             continue
 
-        summary = bug.get("fields", {}).get("summary", "")
-        issue_link = f"{JIRA_BROWSE_URL}{key}"
+        # summary and issue link
+        summary = bug.get("title") or bug.get("fields", {}).get("summary", "")
+        issue_link = bug.get("html_url") or f"https://github.com/{key}"
         attachments = attachment_map.get(key, [])
 
         if attachments:
@@ -157,14 +224,19 @@ def save_to_excel_incremental(bugs, attachment_map, save_every=SAVE_EVERY):
                 # insert GPT response into the excel result.
                 if file_type in ATTACHMENT_FILE_TYPES:
                     # download log file into local folder '/bug_cases/logs'.
-                    response = requests.get(attachment_link)
-                    full_save_path = LOG_SAVE_PATH + key + f"/{attachment_file_name}"
-                    if response.status_code == 200:
-                        # Ensure the directory exists
-                        os.makedirs(os.path.dirname(full_save_path), exist_ok=True)
-                        with open(full_save_path, 'wb') as f:
-                            f.write(response.content)
-                        print(f"{key} - {attachment_file_name} is downloaded successfully.")
+                    try:
+                        response = requests.get(attachment_link, headers=HEADERS, timeout=20)
+                        full_save_path = os.path.join(LOG_SAVE_PATH, key.replace('/', '_')) + f"/{attachment_file_name}"
+                        if response.status_code == 200:
+                            # Ensure the directory exists
+                            os.makedirs(os.path.dirname(full_save_path), exist_ok=True)
+                            with open(full_save_path, 'wb') as f:
+                                f.write(response.content)
+                            print(f"{key} - {attachment_file_name} is downloaded successfully.")
+                        else:
+                            print(f"⚠️ 下载失败：{attachment_link} 状态码 {response.status_code}")
+                    except Exception as e:
+                        print(f"⚠️ 下载附件出错 {attachment_link}: {e}")
                     # OpenAI restrict GPT-4 model's maximum context length is 8192 tokens.
                     if line_count > GPT_MAX_ATTACHMENT_LINE:
                         continue

@@ -1,0 +1,22 @@
+You are an expert in computer systems and concurrency.
+You are given a GitHub issue from the application {app_name}. Answer only the following question:
+Does this issue relate to any application resource?
+Respond strictly with "yes", "no", or "unsure" based on the information provided.
+
+An application resource refers to a shared component that is accessed by multiple threads or processes within the same application.
+Examples include:
+    Shared memory objects
+    Queues or buffers
+    Synchronization primitives such as locks, semaphores, or mutexes
+    File handles, sockets, or database connections shared among threads
+    Any other shared component specific to the application’s design
+
+Here is the issue text:
+
+{issue_text}
+
+
+Return your response only in the following JSON format:
+{{
+  "application_resource": "yes" | "no" | "unsure"
+}}

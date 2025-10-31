@@ -1,0 +1,29 @@
+You are a software reliability researcher.
+You are given a GitHub issue and its discussion thread from a software project.
+
+Your task is to analyze the issue and concisely summarize the key reliability-related aspects.
+
+Answer the following questions clearly, precisely, and as concisely as possible:
+
+symptoms_and_triggers: What incorrect or unexpected behavior is reported? Under what workload, configuration, or environment does it occur?
+root_cause: Why does this happen? Identify whether it stems from a bug in the source code, a design flaw, OS behavior, hardware limitation, scheduling problem, or another factor.
+diagnosis_process: How did developers determine the cause? Summarize the steps, tools, logs, profiling data, benchmarks, or reasoning they used.
+why_difficult_to_diagnose: Why was this issue challenging to identify or reproduce (if applicable)?
+fix_and_resolution: How was the problem resolved, mitigated, or worked around?
+
+Here is the GitHub issue and its discussion thread:
+
+{issue_text}
+
+
+Return your response only in the following JSON format:
+
+{{
+  "symptoms_and_triggers": "...",
+  "root_cause": "...",
+  "diagnosis_process": {{
+    "steps": "...",
+    "why_difficult": "..."
+  }},
+  "fix_and_resolution": "..."
+}}
