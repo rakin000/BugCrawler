@@ -1,0 +1,19 @@
+{
+  "github" : {
+    "owner": "elastic",
+    "repo": "elasticsearch",
+    "search_api": "https://api.github.com/search/issues",
+    "issue_detail_api": "https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}",
+    "state": "closed",
+    "bug_type": "memory",
+    "keywords": "memory",
+    "max_pages": 10,
+    "per_page": 30,
+    "token": "",
+    "start_date": "2022-01-01",
+    "end_date": ""
+  },
+  "csv": {
+    "file_name": "bug_crawler/result/{repo}_{bug_type}_bugs.csv"
+  }
+}

@@ -3,8 +3,9 @@ import json
 import os
 from dotenv import load_dotenv
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-env_path = os.path.join(parent_dir, ".env")
+# parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# env_path = os.path.join(parent_dir, ".env")
+env_path = ".env"
 if load_dotenv and os.path.exists(env_path):
     load_dotenv(env_path)
 

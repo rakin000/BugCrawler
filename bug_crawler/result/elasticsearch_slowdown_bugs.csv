@@ -1,0 +1,813 @@
+,number,title,body,user,state,labels,url,created_at,comments,repository_url,html_url,application_resoure
+0,135340,Possible performance regression in 9.1.x (TSDS),"Hi, guys!
+
+On a multi-node cluster, indexing of TSDS (otel-format metrics) is stable on 9.0.x.
+After upgrading to 9.1.4, the indexing rate drops and the write queue grows, making the cluster unstable.
+
+Profiling shows significant time spent in dv.writeField (see pic. 1)
+Disabling the new 9.1.x optimization with:
+
+```ini
+-Dorg.elasticsearch.index.codec.tsdb.es819.ES819TSDBDocValuesConsumer.enableOptimizedMerge=false
+```
+
+restores normal performance.
+
+<img width=""1879"" height=""916"" alt=""Image"" src=""https://github.com/user-attachments/assets/0d519768-cc86-4113-83c9-9e7b6a253a2e"" />
+
+<img width=""890"" height=""517"" alt=""Image"" src=""https://github.com/user-attachments/assets/5aecaa33-fc2b-4d70-bc54-20f9b2ea08c5"" />
+<img width=""922"" height=""294"" alt=""Image"" src=""https://github.com/user-attachments/assets/13c028f7-84ee-4ba9-b519-b8e945775432"" />
+
+
+Can you help figure out the root cause?
+
+(using java 21)",sherman,closed,"['>bug', 'Team:StorageEngine', 'priority:high', ':StorageEngine/Codec']",https://github.com/elastic/elasticsearch/issues/135340,2025-09-24T10:46:49Z,11,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/135340,"{
+  ""application_resource"": ""yes""
+}"
+1,118623,Performance degradation after upgrading from 8.6.1 to 8.16.1,"### Elasticsearch Version
+
+8.16.1
+
+### Installed Plugins
+
+_No response_
+
+### Java Version
+
+_bundled_
+
+### OS Version
+
+6.1.112-124.190.amzn2023.aarch64
+
+### Problem Description
+
+After starting an upgrade from 8.6.1 to 8.16.1 we noticed that data nodes running new version are performing worse.
+Their CPU was significantly higher than on the data nodes with the old version:
+<img width=""1594"" alt=""Image"" src=""https://github.com/user-attachments/assets/f5ca3899-ce46-49de-9587-9380e38bbefd"" />
+
+We also noticed that new version nodes have much higher flush rate:
+<img width=""1588"" alt=""Image"" src=""https://github.com/user-attachments/assets/d3cc7905-242e-42ae-8078-649831089b4d"" />
+
+It doesn't matter whether an old node is upgraded to 8.16.1 or a brand new node spun up with 8.16.1 - they all show same symptoms of higher CPU and much higher flush rate degrading performance of the cluster as a whole.
+
+We added more data nodes with the new 8.16.1 version and now have a cluster with 35 ""old"" nodes and 36 ""new"" nodes.
+New nodes are consuming twice more CPU and have much higher flush rate:
+<img width=""1587"" alt=""Image"" src=""https://github.com/user-attachments/assets/bfcc8d4b-eba9-47da-aaa1-7ab7a23253a4"" />
+<img width=""1591"" alt=""Image"" src=""https://github.com/user-attachments/assets/b36c9483-028f-40da-a4f8-08ca44e10fe1"" />
+
+Another notable difference is how new nodes have higher cache size:
+<img width=""1174"" alt=""Image"" src=""https://github.com/user-attachments/assets/54ea3357-eeea-449f-9c6e-342050cf2ed9"" />
+
+The reason why we were upgrading to 8.16.1 is to mitigate [this issue](https://github.com/elastic/elasticsearch/issues/100755)
+
+We are running Elasticsearch on EC2 with ephemeral instance store on c7gd.16xlarge. Elasticsearch version aside no changes were made to the cluster infrastructure, JVM/Elasticsearch options, etc.
+
+### Steps to Reproduce
+
+Upgrade a 8.6.1 data node to 8.16.1
+
+### Logs (if relevant)
+
+_No response_
+
+## None of the below has changed between the upgrade
+
+### JVM options
+```
+## JVM configuration
+-Xms30500m
+-Xmx30500m
+8-13:-XX:+UseConcMarkSweepGC
+8-13:-XX:CMSInitiatingOccupancyFraction=75
+8-13:-XX:+UseCMSInitiatingOccupancyOnly
+8:-XX:+AlwaysPreTouch
+8:-Xss1m
+8:-Djava.awt.headless=true
+8:-Dfile.encoding=UTF-8
+8:-Djna.nosys=true
+8:-XX:-OmitStackTraceInFastThrow
+8:-Dio.netty.noUnsafe=true
+8:-Dio.netty.noKeySetOptimization=true
+8:-Dio.netty.recycler.maxCapacityPerThread=0
+8:-Dlog4j.shutdownHookEnabled=false
+8:-Dlog4j2.disable.jmx=true
+8:-XX:+PrintGCDetails
+8:-XX:+PrintGCDateStamps
+8:-XX:+PrintTenuringDistribution
+8:-XX:+PrintGCApplicationStoppedTime
+8:-Xloggc:logs/gc.log
+8:-XX:+UseGCLogFileRotation
+8:-XX:NumberOfGCLogFiles=32
+8:-XX:GCLogFileSize=64m
+9-:-Djava.locale.providers=COMPAT
+-Des.index.memory.max_index_buffer_size=10240m
+14-:-XX:+UseG1GC
+14-:-XX:G1ReservePercent=25
+14-:-XX:InitiatingHeapOccupancyPercent=30
+14-:-Djava.io.tmpdir=${ES_TMPDIR}
+14-:-XX:+HeapDumpOnOutOfMemoryError
+14-:-XX:HeapDumpPath=data
+14-:-XX:ErrorFile=logs/hs_err_pid%p.log
+-Dlog4j2.formatMsgNoLookups=true
+```
+
+### Elasticsearch static node config
+```
+cloud.node.auto_attributes: true
+cluster.routing.allocation.awareness.attributes: aws_availability_zone
+action.auto_create_index: false
+indices.memory.index_buffer_size: 25%
+network.host: 0.0.0.0
+http.compression: true
+action.destructive_requires_name: true
+bootstrap.memory_lock: true
+thread_pool.write.queue_size: 2500
+script.max_compilations_rate: 30/1m
+xpack.graph.enabled: false
+xpack.ml.enabled: false
+xpack.watcher.enabled: false
+discovery.seed_providers: ec2
+indices.breaker.request.limit: 1gb
+indices.breaker.fielddata.limit: 1gb
+xpack.security.enabled: true
+xpack.security.http.ssl.enabled: false
+xpack.security.transport.ssl.enabled: true
+xpack.security.transport.ssl.verification_mode: certificate
+xpack.security.transport.ssl.client_authentication: required
+xpack.security.transport.ssl.keystore.path: elastic-certificates.p12
+xpack.security.transport.ssl.truststore.path: elastic-certificates.p12
+transport.compress: true
+transport.compression_scheme: lz4
+cluster.name: CLUSTER_NAME
+discovery.ec2.tag.elasticsearch_cluster_name: CLUSTER_NAME
+node.name: NODE_NAME
+path.data: ""/media/ephemeral""
+path.logs: ""/var/log/elasticsearch""
+reindex.remote.whitelist: 10.0.*.*:9200
+node.roles:
+- data
+```
+
+### Elasticsearch cluster settings
+```json
+{
+  ""persistent"": {
+    ""cluster"": {
+      ""routing"": {
+        ""allocation"": {
+          ""cluster_concurrent_rebalance"": ""100"",
+          ""node_concurrent_recoveries"": ""100"",
+          ""disk"": {
+            ""watermark"": {
+              ""low"": ""75%"",
+              ""high"": ""85%""
+            }
+          },
+          ""node_initial_primaries_recoveries"": ""114""
+        }
+      }
+    },
+    ""indices"": {
+      ""breaker"": {
+        ""fielddata"": {
+          ""limit"": ""1gb""
+        },
+        ""request"": {
+          ""limit"": ""1gb""
+        }
+      },
+      ""recovery"": {
+        ""max_bytes_per_sec"": ""1000mb""
+      }
+    },
+    ""search"": {
+      ""default_search_timeout"": ""120s"",
+      ""default_allow_partial_results"": ""false"",
+      ""max_open_scroll_context"": ""500000""
+    },
+    ""ingest"": {
+      ""geoip"": {
+        ""downloader"": {
+          ""enabled"": ""false""
+        }
+      }
+    },
+    ""logger"": {
+      ""org"": {
+        ""elasticsearch"": {
+          ""deprecation"": ""ERROR""
+        }
+      }
+    }
+  },
+  ""transient"": {}
+}
+```",gregolsen,closed,"['>bug', 'Team:Search Foundations', ':Search Foundations/Search']",https://github.com/elastic/elasticsearch/issues/118623,2024-12-12T21:38:03Z,21,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/118623,"{
+  ""application_resource"": ""yes""
+}"
+2,112781,Lazy data stream rollover is not triggered when using reroute,"### Elasticsearch Version
+
+8.15.1
+
+### Installed Plugins
+
+_No response_
+
+### Java Version
+
+_bundled_
+
+### OS Version
+
+N/A
+
+### Problem Description
+
+Lazy rollover on a data stream is not triggered when writing a document that is rerouted to another data stream. This affects the apm-data plugin, where we perform a lazy rollover of matching data stream patterns when installing or updating index templates. The data stream never rolls over. See https://github.com/elastic/apm-server/issues/14060#issuecomment-2344837717
+
+Should a write that leads to a reroute also trigger the lazy rollover? I think so, otherwise the default pipeline will not change.
+
+### Steps to Reproduce
+
+1. Create an index template which sets a default ingest pipeline with reroute
+
+```
+PUT /_ingest/pipeline/demo-reroute
+{
+  ""processors"": [
+    {
+      ""reroute"": {""namespace"": ""foo""}
+    }
+  ]
+}
+
+PUT /_index_template/demo_1
+{
+  ""index_patterns"" : [""demo*""],
+  ""data_stream"": {}, 
+  ""priority"" : 1,
+  ""template"": {
+    ""settings"" : {
+      ""number_of_shards"": 1,
+      ""index.default_pipeline"": ""demo-reroute""
+    }
+  }
+}
+```
+
+2. Create a data stream matching the index template
+
+```
+PUT /_data_stream/demo-dataset-default
+```
+
+3. Send a document to the data stream; it will be rerouted
+
+```
+POST /demo-dataset-default/_doc
+{
+  ""@timestamp"": ""2024-09-12""
+}
+
+{
+  ""_index"": "".ds-demo-dataset-foo-2024.09.12-000001"",
+  ""_id"": ""z2Ab5JEBCHevSrCVP7aG"",
+  ""_version"": 1,
+  ""result"": ""created"",
+  ""_shards"": {
+    ""total"": 2,
+    ""successful"": 1,
+    ""failed"": 0
+  },
+  ""_seq_no"": 0,
+  ""_primary_term"": 1
+}
+```
+ 
+4. Create another index template with higher priority with the same index pattern, with no default ingest pipeline
+
+```
+PUT /_index_template/demo_2
+{
+  ""index_patterns"" : [""demo*""],
+  ""data_stream"": {}, 
+  ""priority"" : 2
+}
+```
+
+5. Rollover the source data stream with ""lazy=true""
+
+```
+POST /demo-dataset-default/_rollover?lazy=true
+```
+
+6. Send a document to the data stream; it will still be rerouted
+
+```
+POST /demo-dataset-default/_doc
+{
+  ""@timestamp"": ""2024-09-12""
+}
+
+{
+  ""_index"": "".ds-demo-dataset-foo-2024.09.12-000001"",
+  ""_id"": ""x2gc5JEBfAEizTaQVStE"",
+  ""_version"": 1,
+  ""result"": ""created"",
+  ""_shards"": {
+    ""total"": 2,
+    ""successful"": 2,
+    ""failed"": 0
+  },
+  ""_seq_no"": 1,
+  ""_primary_term"": 1
+}
+```
+
+7. Rollover the source data stream with ""lazy=false""
+
+```
+POST /demo-dataset-default/_rollover?lazy=false
+```
+
+8. Send a document to the data stream; it will not be rerouted
+
+```
+POST /demo-dataset-default/_doc
+{
+  ""@timestamp"": ""2024-09-12""
+}
+
+{
+  ""_index"": "".ds-demo-dataset-default-2024.09.12-000002"",
+  ""_id"": ""1mAf5JEBCHevSrCVc7YV"",
+  ""_version"": 1,
+  ""result"": ""created"",
+  ""_shards"": {
+    ""total"": 2,
+    ""successful"": 2,
+    ""failed"": 0
+  },
+  ""_seq_no"": 0,
+  ""_primary_term"": 1
+}
+```
+
+### Logs (if relevant)
+
+_No response_",axw,closed,"['>bug', ':Data Management/Data streams', 'Team:Data Management']",https://github.com/elastic/elasticsearch/issues/112781,2024-09-12T02:47:46Z,12,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/112781,"{
+  ""application_resource"": ""yes""
+}"
+3,102063,"During data ingestion, significants amount of CPU and memory is used to parse date strings (>10% realistic for some workloads)","### Elasticsearch Version
+
+8.11.0
+
+### Installed Plugins
+
+_No response_
+
+### Java Version
+
+_bundled_
+
+### OS Version
+
+Linux, 6.5.9-arch2-1
+
+### Problem Description
+
+I was trying to reproduce benchmarks in [elastic/elasticsearch-opensearch-benchmark](https://github.com/elastic/elasticsearch-opensearch-benchmark), but got surprised at indexing. What surprised me was how much CPU time and memory was spent on parsing date strings for the 2 date fields in the data used by the benchmark - roughly 10% of the CPU time and ~30% of memory allocations came from parsing date strings.
+
+This is due to the `java.time` date parsers being quite slow - but it is quite possible to build a faster parser.  I tried building [one](https://github.com/antonha/es-date-parse-bench-nov-2023/blob/main/src/main/java/antonha/dateparse/CharDateParser.java) with the same leniency as `strict_date_optional_time` (which is the default, and used in ES/OpenSearch benchmark repo). I got it about 50% faster, but I'm sure that it can be done better than that. 
+
+Given how much Elasticsearch is used for log data, I would date parsing slowness to be a performance bug. 
+
+There are more details in [this blog post](https://blunders.io/posts/es-benchmark-1-date-parse). There are benchmarks of different (mostly) relevant date parsers in the [antonha/es-date-parse-bench-nov-2023](https://github.com/antonha/es-date-parse-bench-nov-2023) repository.
+
+I will also open an issue with OpenSearch, since I do believe that they are affected as well (the code is older than the fork). I will happily work on a PR, assuming that that does not prevent me from contributing the same to OpenSearch. 
+
+### Steps to Reproduce
+
+The data and index setup is the one described in [elastic/elasticsearch-opensearch-benchmark](https://github.com/elastic/elasticsearch-opensearch-benchmark). I used version 8.11.0 of Elasticsearch. 
+
+I used a batch indexer on the same machine, with a decently fast SSD for storage. The indexing process needs to be CPU-bound (for the Elasticsearch process) to experience the slowdown. Using a profiler, such as Flight Recorder, should be able to show the same CPU and memory usage. 
+
+### Logs (if relevant)
+
+_No response_",antonha,closed,"['>enhancement', ':Core/Infra/Core', 'Team:Core/Infra']",https://github.com/elastic/elasticsearch/issues/102063,2023-11-13T10:26:27Z,5,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/102063,"{
+  ""application_resource"": ""no""
+}"
+4,101763,ESQL: unexpected count(*) query planning slowdown at scale,"A simple query like 
+
+```
+FROM logs-* 
+| STATS count=count(*) 
+| SORT count DESC 
+| LIMIT 0
+```
+
+takes a few milliseconds to execute on a small cluster (< 10 nodes), but on bigger clusters (20 - 70 nodes) it takes hundreds of milliseconds (recorded execution time up to 600ms on a 70 node cluster).
+
+The query is optimized as follows:
+
+```
+Limit[10000[INTEGER]]                                                             ! LocalRelation[[count{r}#284],EMPTY]
+\_Limit[0[INTEGER]]                                                               ! 
+  \_OrderBy[[Order[count{r}#284,DESC,FIRST]]]                                     ! 
+    \_Aggregate[[],[COUNT(*[KEYWORD]) AS count]]                                  ! 
+      \_EsRelation[person][@timestamp{f}#286, boolean{f}#287, !dense_vector, !..] ! 
+
+```
+That seems correct. 
+
+Probably most of the cost is on the planning itself (maybe `_field_caps`?)
+
+Interestingly, adding groupings to the STATS makes things better, eg. a query like
+
+```
+FROM logs-* 
+| STATS count=count(*) BY agent.version 
+| SORT count DESC 
+| LIMIT 20
+```
+
+is more efficient, and adding one more grouping
+
+```
+FROM logs-* 
+| STATS count=count(*) BY agent.version, agent.type 
+| SORT count DESC 
+| LIMIT 20
+```
+
+makes it even more efficient.
+
+",luigidellaquila,closed,"['>enhancement', 'Team:QL (Deprecated)', ':Analytics/ES|QL']",https://github.com/elastic/elasticsearch/issues/101763,2023-11-03T08:30:36Z,4,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/101763,"{
+  ""application_resource"": ""unsure""
+}"
+5,99409,[Ml] CircuitBreakingException when deploying the ELSER model,"### Elasticsearch Version
+
+8.9.1
+
+### Installed Plugins
+
+_No response_
+
+### Java Version
+
+_bundled_
+
+### OS Version
+
+any
+
+### Problem Description
+
+Deploying the ELSER model can cause a `CircuitBreakingException` if the cluster is being used heavily. Often the `CircuitBreakingException` is thrown because a request from Kibana or another client cannot be serviced with the available memory while loading the ELSER model which temporarily increases memory pressure in the JVM. In this scenario Kibana becomes unresponsive but in many cases the ELSER model deployment completes successfully but the UI takes a while to see that status change. 
+
+```
+Caused by: org.elasticsearch.common.breaker.CircuitBreakingException: [parent] Data too large, data for [indices:data/read/search[phase/query]] would be [1045092822/996.6mb], which is larger than the limit of [1020054732/972.7mb], real usage: [1045091992/996.6mb], new bytes reserved: [830/830b], usages [eql_sequence=0/0b, fielddata=1779/1.7kb, request=0/0b, inflight_requests=830/830b, model_inference=0/0b] at org.elasticsearch.indices.breaker.HierarchyCircuitBreakerService.checkParentLimit(HierarchyCircuitBreakerService.java:414)
+```
+
+### Steps to Reproduce
+
+The problem occurs more commonly on smaller nodes with less JVM heap memory (e.g. 2GB JVM heap). Reproduce by repeatedly deploying and un-deploying the ELSER model. 
+
+### Logs (if relevant)
+
+_No response_",davidkyle,closed,"['>bug', ':ml', 'Team:ML']",https://github.com/elastic/elasticsearch/issues/99409,2023-09-11T09:14:13Z,5,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/99409,"{
+  ""application_resource"": ""yes""
+}"
+6,96349,Fetching many fields takes much more time than retrieving _source,"
+In a search request, asking to retrieve many fields can take substantially more time than retrieving the whole source.
+
+For example, tested in ES 8.6 asking to retrieve 200 fields takes  > 6s. On the same shard without fetching fields, but grabbing the whole source takes around 139 ms.
+
+```js
+""fields"": [
+    {
+      ""field"": ""*"",
+      ""include_unmapped"": ""true""
+    },
+    {
+      ""field"": ""@timestamp"",
+      ""format"": ""strict_date_optional_time""
+    },
+    {
+      ""field"": ""field1"",
+      ""format"": ""strict_date_optional_time""
+    },
+    {
+      ""field"": ""field2"",
+      ""format"": ""strict_date_optional_time""
+    },
+    {
+      ""field"": ""field3"",
+      ""format"": ""strict_date_optional_time""
+    },
+```",mayya-sharipova,closed,"['>bug', 'priority:normal', 'Team:Search Foundations', ':Search Foundations/Search']",https://github.com/elastic/elasticsearch/issues/96349,2023-05-25T13:57:23Z,5,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/96349,"{
+  ""application_resource"": ""unsure""
+}"
+7,91440,Add capability to configure total fields limit at specific path within an index mapping,"### Description
+
+A feature to put a total fields limit at a particular path point in the mapping.
+
+Like under a particular path there can be no more than `x` fields created nested or otherwise below this mapping path as an index setting. 
+
+Provides a finer control than the more blunt total index fields limit, preventing more specific field explosion occurring at a particular mapping path/location and still not impacting the overall mapping from increasing fields within the index level limit.
+
+Especially useful for scenarios where mapping explosion is occurring under a particular level in the mapping rather than explosions occurring at top level in the mapping.
+
+Examples might be APM custom labels being created in error with high cardinality field names (eg timestamp, username or other high cardinality value added to label field name) or any general ""attributes"" type field where the values could be high cardinality and all occur at that one level.
+
+This feature might also be useful even if not directly for preventing mapping explosion but just creating a mapping level limit of how many fields can exist under a particular level as a limit that can be enforced at mapping for example you only want a possibility of 20 fields under some label/attribute section.
+
+This could be implemented as part of the dynamic mapping functionality and have an additional total mapping configuration that can be specified as part of a field config.",geekpete,closed,"['>enhancement', ':Search Foundations/Mapping', 'Team:Search Foundations']",https://github.com/elastic/elasticsearch/issues/91440,2022-11-09T02:14:21Z,5,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/91440,"{
+  ""application_resource"": ""yes""
+}"
+8,90526,After update to Lucene 9.4 use `--enable-preview` on Java==19 (exact) to allow mmap use new JDK APIs,"### Description
+
+Apache Lucene 9.4 will have support for Java 19 Panama APIs to mmap index files (using a MR-JAR). See https://github.com/apache/lucene/pull/912 for more information.
+
+As those APIs are not yet enabled by default in the JDK, we have to still use some opt-in approach, controlled by Java's command line:
+
+- Lucene by default uses the old implementation using `MappedByteBuffer` and several hacks which may also risk crushing the JDK if an open index is closed from another thread while a search is running (this is well known). If Java 19 is detected, Lucene will log a warning through JUL when `MMapDirectory` is initialized (see below).
+- If you pass `--enable-preview` to the Java command line (next to heap settings), it will enable preview APIs in JDK (https://openjdk.org/jeps/12). Lucene detects this and switches `MMapDirectory` and uses a new implementation `MemorySegmentIndexInput` for the inputs to use those new APIs (at moment it will also log this as ""info"" message to JUL). The new APIs are safe and can no longer crush the JVM. But most importantly, all index files are now mapped in portions of 16 GiB instead of 1 GiB into memory. In fact, unless an index is force-merged to one segment, all index files will then consist only of one memory mapping spawning the whole file! This will help Hotspot to further optimize reading as only one implementation on `MemorySegmentIndexInput` ist used. In addition, because the number of mappings is dramatically reduced (approximately 5 times less mappings, because the maximum segment size is 5 Gigabytes by default and all such segments now use one instead of 5 mappings). This may allow users to no longer change sysctl (see https://www.elastic.co/guide/en/elasticsearch/reference/current/vm-max-map-count.html) and go with defaults of OS. On the other hand users may host more indexes with many more segments on one node. 
+
+**Some TODOs:**
+- Make sure that Elasticsearch also redirects stuff logged via `java.util.logging` (JUL) to its own log file, so they do not land in console. This can be done with log4j by adding  the log4j-jul adapter and install it using a system property in the Bootstrap classes. I have not checked if this is already done. The reason for this is that Apache Lucene now logs some events using java.util.logging since Lucene 9.0. Some of those events are `MMapDirectory` messages (e.g., when unmapping was not working) or few others like some module system settings are incorrect. Logging is very seldom, but for this feature it will definitely log using JUL, so it would be good to make sure Elasticsearch redirects JUL logging correctly to its own loggers. This could be a separate issue!
+- The Elasticsearch startup script should pass `--enable-preview` as command line flag if *exactly* Java 19 is used to start up Elasticsearch. If this is not done, a warning gets logged (see above).
+
+Important: Lucene 9.4 only supports this on Java 19 (exactly), because the APIs are in flux. If you start with Java 20, it falls back to the classical `MMapDirectory`. We will add support for Java 20 in a later release. The reason for this is that the class files of new implementation are marked by some special version numbers that make them ONLY compatible to Java 19, not earlier or later, to allow the JDK to apply changes to the API before final release in Java 21. But passing `--enable-preview` to later versions won't hurt, so maybe enable it on all versions >= 19.
+
+*A last note:* The downside of this new code is that closing and unmapping an index file gets more heavy (it will trigger an safepoint in the JVM). We have not yet found out how much this impacts servers opening/closing index files a lot. Because of this we would really like Elastic / Elasticsearch to do benchmarking on this, ideally if their users and customers could optionally enable it. But benchmarking should be done now, because with hopefully Java 21, Lucene will use the new implementation by default. Java 20 will be the second and last preview round.",uschindler,closed,"['>enhancement', ':Delivery/Build', ':Core/Infra/Core', 'Team:Core/Infra', 'Team:Delivery']",https://github.com/elastic/elasticsearch/issues/90526,2022-09-29T14:32:42Z,39,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/90526,"{
+  ""application_resource"": ""yes""
+}"
+9,89107,Default APM tracing configuration wastes CPU on exception throwing,"Since the APM tracing was merged I see lots of exception/error throwing in profiles for nodes that have no configuration for APM set up.
+I think something needs to be fixed here to make the APM calls noops without configuration or so.
+
+![image](https://user-images.githubusercontent.com/6490959/182830081-44b40d42-9b75-4436-958d-b67578fe27e3.png)
+",original-brownbear,closed,"['>bug', ':Core/Infra/Core', 'Team:Core/Infra']",https://github.com/elastic/elasticsearch/issues/89107,2022-08-04T10:54:27Z,4,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/89107,"{
+  ""application_resource"": ""unsure""
+}"
+10,87651,Performance regression with geoshape queries in 7.10,"### Elasticsearch Version
+
+7.10
+
+### Installed Plugins
+
+_No response_
+
+### Java Version
+
+_bundled_
+
+### OS Version
+
+Linux hugods 5.10.0-13-amd64 #1 SMP Debian 5.10.106-1 (2022-03-17) x86_64 GNU/Linux
+
+### Problem Description
+
+When preparing a migration from ES 6.8 to ES 7.17, we found what looks like a performance regression on some shape queries.
+
+After searching the ES commit that introduces this regression, we found it is when Lucene version was updated from 8.6.2 to 8.7.0 (in [this PR](https://github.com/elastic/elasticsearch/pull/61957))
+
+The regression is better observed on a multisearch where for some configurations, we can see a x2-x4 slowdown. It still exists on simple/non-multi search, but to a lesser extent (something like 15% slowdown).
+
+It occurs when lots of polygons are indexed and we try to issue a ""point in polygon"" query.
+
+I would be happy to give additional information to help investigate the problem. Thanks for your help.
+
+### Steps to Reproduce
+
+So far, the reproduction involves an important amount of data. Here are some steps to reproduce with a small (unix) shell script.
+
+1. Download a geojson file with several polygons. I've used shapes coming from one of our public datasets. A good example is `curl ""https://public.opendatasoft.com/api/explore/v2.0/catalog/datasets/georef-france-commune-millesime/exports/geojson?select=geo_shape&where=reg_code=53&refine=year:2021"" -o reg53.geojson` which contains 1208 shapes of cities
+2. Create an index with one field of type geo_shape
+3. Index all shapes of the geojson. Calling `jq -c '.features[]|({""index"":{}},{""geoshape"":.geometry})'` can convert GeoJSON's features into documents that can be ingested by the bulk API
+4. Issue a multisearch that repeats, say 50000 times, the following query: `{""query"":{""bool"":{""filter"":[{""geo_shape"":{""geoshape"":{""shape"":{""type"":""Point"",""coordinates"":[-3.383390,47.757460]},""relation"": ""intersects""}}}]}}}`
+5. Test the multisearch query on a version before the aforementioned commit and again on a version after the commit
+
+A (bash) script that helps to reproduce the issue can be found [here](https://gist.github.com/mhugo/724320454f14a39ec3809ece5d9e00b4)
+
+I observe a 50% slowdown with this example on my machine. On a larger dataset (all polygon cities, but this is too large for the simple script described here) with >34000 polygons and the exact same multisearch query I can see a 4x-5x regression.
+
+### Logs (if relevant)
+
+_No response_",mhugo,closed,"['>bug', ':Analytics/Geo', 'Team:Analytics']",https://github.com/elastic/elasticsearch/issues/87651,2022-06-14T13:26:24Z,8,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/87651,"{
+  ""application_resource"": ""unsure""
+}"
+11,87035,[CI] GeoIpDownloaderStatsIT testStats failing,"**Build scan:**
+https://gradle-enterprise.elastic.co/s/ndzzouplmtgfe/tests/:modules:ingest-geoip:internalClusterTest/org.elasticsearch.ingest.geoip.GeoIpDownloaderStatsIT/testStats
+
+**Reproduction line:**
+`./gradlew ':modules:ingest-geoip:internalClusterTest' --tests ""org.elasticsearch.ingest.geoip.GeoIpDownloaderStatsIT.testStats"" -Dtests.seed=FB06B6504F00972 -Dtests.locale=en-IN -Dtests.timezone=America/Halifax -Druntime.java=17`
+
+**Applicable branches:**
+master
+
+**Reproduces locally?:**
+No
+
+**Failure history:**
+https://gradle-enterprise.elastic.co/scans/tests?tests.container=org.elasticsearch.ingest.geoip.GeoIpDownloaderStatsIT&tests.test=testStats
+
+**Failure excerpt:**
+```
+java.lang.AssertionError: 
+Expected: <3>
+     but: was <0>
+
+  at __randomizedtesting.SeedInfo.seed([FB06B6504F00972:953132DA6C2CC751]:0)
+  at org.hamcrest.MatcherAssert.assertThat(MatcherAssert.java:18)
+  at org.junit.Assert.assertThat(Assert.java:956)
+  at org.junit.Assert.assertThat(Assert.java:923)
+  at org.elasticsearch.ingest.geoip.GeoIpDownloaderStatsIT.lambda$testStats$1(GeoIpDownloaderStatsIT.java:89)
+  at org.elasticsearch.test.ESTestCase.assertBusy(ESTestCase.java:1096)
+  at org.elasticsearch.test.ESTestCase.assertBusy(ESTestCase.java:1069)
+  at org.elasticsearch.ingest.geoip.GeoIpDownloaderStatsIT.testStats(GeoIpDownloaderStatsIT.java:86)
+  at jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(NativeMethodAccessorImpl.java:-2)
+  at jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77)
+  at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+  at java.lang.reflect.Method.invoke(Method.java:568)
+  at com.carrotsearch.randomizedtesting.RandomizedRunner.invoke(RandomizedRunner.java:1758)
+  at com.carrotsearch.randomizedtesting.RandomizedRunner$8.evaluate(RandomizedRunner.java:946)
+  at com.carrotsearch.randomizedtesting.RandomizedRunner$9.evaluate(RandomizedRunner.java:982)
+  at com.carrotsearch.randomizedtesting.RandomizedRunner$10.evaluate(RandomizedRunner.java:996)
+  at com.carrotsearch.randomizedtesting.rules.StatementAdapter.evaluate(StatementAdapter.java:36)
+  at org.apache.lucene.tests.util.TestRuleSetupTeardownChained$1.evaluate(TestRuleSetupTeardownChained.java:44)
+  at org.apache.lucene.tests.util.AbstractBeforeAfterRule$1.evaluate(AbstractBeforeAfterRule.java:43)
+  at org.apache.lucene.tests.util.TestRuleThreadAndTestName$1.evaluate(TestRuleThreadAndTestName.java:45)
+  at org.apache.lucene.tests.util.TestRuleIgnoreAfterMaxFailures$1.evaluate(TestRuleIgnoreAfterMaxFailures.java:60)
+  at org.apache.lucene.tests.util.TestRuleMarkFailure$1.evaluate(TestRuleMarkFailure.java:44)
+  at com.carrotsearch.randomizedtesting.rules.StatementAdapter.evaluate(StatementAdapter.java:36)
+  at com.carrotsearch.randomizedtesting.ThreadLeakControl$StatementRunner.run(ThreadLeakControl.java:375)
+  at com.carrotsearch.randomizedtesting.ThreadLeakControl.forkTimeoutingTask(ThreadLeakControl.java:824)
+  at com.carrotsearch.randomizedtesting.ThreadLeakControl$3.evaluate(ThreadLeakControl.java:475)
+  at com.carrotsearch.randomizedtesting.RandomizedRunner.runSingleTest(RandomizedRunner.java:955)
+  at com.carrotsearch.randomizedtesting.RandomizedRunner$5.evaluate(RandomizedRunner.java:840)
+  at com.carrotsearch.randomizedtesting.RandomizedRunner$6.evaluate(RandomizedRunner.java:891)
+  at com.carrotsearch.randomizedtesting.RandomizedRunner$7.evaluate(RandomizedRunner.java:902)
+  at org.apache.lucene.tests.util.AbstractBeforeAfterRule$1.evaluate(AbstractBeforeAfterRule.java:43)
+  at com.carrotsearch.randomizedtesting.rules.StatementAdapter.evaluate(StatementAdapter.java:36)
+  at org.apache.lucene.tests.util.TestRuleStoreClassName$1.evaluate(TestRuleStoreClassName.java:38)
+  at com.carrotsearch.randomizedtesting.rules.NoShadowingOrOverridesOnMethodsRule$1.evaluate(NoShadowingOrOverridesOnMethodsRule.java:40)
+  at com.carrotsearch.randomizedtesting.rules.NoShadowingOrOverridesOnMethodsRule$1.evaluate(NoShadowingOrOverridesOnMethodsRule.java:40)
+  at com.carrotsearch.randomizedtesting.rules.StatementAdapter.evaluate(StatementAdapter.java:36)
+  at com.carrotsearch.randomizedtesting.rules.StatementAdapter.evaluate(StatementAdapter.java:36)
+  at org.apache.lucene.tests.util.TestRuleAssertionsRequired$1.evaluate(TestRuleAssertionsRequired.java:53)
+  at org.apache.lucene.tests.util.AbstractBeforeAfterRule$1.evaluate(AbstractBeforeAfterRule.java:43)
+  at org.apache.lucene.tests.util.TestRuleMarkFailure$1.evaluate(TestRuleMarkFailure.java:44)
+  at org.apache.lucene.tests.util.TestRuleIgnoreAfterMaxFailures$1.evaluate(TestRuleIgnoreAfterMaxFailures.java:60)
+  at org.apache.lucene.tests.util.TestRuleIgnoreTestSuites$1.evaluate(TestRuleIgnoreTestSuites.java:47)
+  at com.carrotsearch.randomizedtesting.rules.StatementAdapter.evaluate(StatementAdapter.java:36)
+  at com.carrotsearch.randomizedtesting.ThreadLeakControl$StatementRunner.run(ThreadLeakControl.java:375)
+  at com.carrotsearch.randomizedtesting.ThreadLeakControl.lambda$forkTimeoutingTask$0(ThreadLeakControl.java:831)
+  at java.lang.Thread.run(Thread.java:833)
+
+```",hendrikmuhs,closed,"['>test-failure', ':Data Management/Ingest Node', 'Team:Data Management']",https://github.com/elastic/elasticsearch/issues/87035,2022-05-23T11:55:49Z,6,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/87035,"{
+  ""application_resource"": ""unsure""
+}"
+12,84721,Performance slowdown on high cardinality keyword fields - enhancement opt out of terms dictionary compressing,"### Elasticsearch Version
+
+7.14.0 and higher
+
+### Problem Description
+
+Segment files created since 7.14.0 are slower for cardinality aggregation on high cardinality (keyword) fields. This is potentially a side effect of https://issues.apache.org/jira/browse/LUCENE-9663 where compression was introduced for terms dictionary
+
+The current issue is to discuss introducing some setting to opt out of this compression
+
+### Steps to Reproduce
+
+1. In 7.13.4, create the following index :
+```
+PUT test7134
+{
+  ""mappings"": {
+    ""properties"": {
+      ""@timestamp"": {
+        ""type"": ""date"",
+        ""format"": ""strict_date_optional_time""
+      },
+      ""foo"": {
+        ""type"": ""keyword""
+      }
+    }
+  },
+  ""settings"": {
+    ""index"": {
+      ""number_of_shards"": ""1"",
+      ""number_of_replicas"": ""0""
+    }
+  }
+}
+```
+
+2. Using logstash add 3 million docs with around 1 million distinct values (optionally set `pipeline.batch.size: 2000` to speed up the test): 
+```
+input
+{
+ generator
+  {
+     id => ""generator1"" 
+     count => 3000000
+  }
+}
+filter {
+    mutate {
+        id => ""mutate1""
+        remove_field => [ ""message"", ""host"" ]
+    }
+    ruby {
+        id => ""ruby1""
+        code => ""event.set('foo','somefixedprefix-'+rand(1000000).to_s)"" # aiming for close to 1 million distinct values
+    }
+}
+output
+{
+ elasticsearch {
+ id => ""es1"" 
+ hosts => [ ""https://es0:9200"" ]
+  user => ""elastic""
+  password => ""changeme""
+  cacert => ""/usr/share/logstash/config/ca.crt""
+  index => ""test7134""
+  manage_template => false
+ }
+}
+```
+
+3. Upgrade to 7.14.0 (or higher - same performance slowdown observed to segment files created from 7.14.0 to 8.0.1)
+4.  Reindex to a new index in 7.14.0 : 
+```
+PUT test7140-reindexed
+{
+  ""mappings"": {
+    ""properties"": {
+      ""@timestamp"": {
+        ""type"": ""date"",
+        ""format"": ""strict_date_optional_time""
+      },
+      ""foo"": {
+        ""type"": ""keyword""
+      }
+    }
+  },
+  ""settings"": {
+    ""index"": {
+      ""number_of_shards"": ""1"",
+      ""number_of_replicas"": ""0""
+    }
+  }
+}
+
+POST _reindex?wait_for_completion=false
+{
+  ""source"": {
+    ""index"": ""test7134"",
+    ""size"": 2000
+  },
+  ""dest"": {
+    ""index"": ""test7140-reindexed""
+  }
+}
+
+#to track - leave a minute after for merge policy to settle down (do not force merge any index)
+GET _tasks/wW0seewBRZKjF6S3xSKy_A:2599?human
+```
+
+5. compare performance with cardinality aggregation between the index with segment files with older lucene version are faster : 
+```
+# took : 1000 ms (average over multiple tests)
+POST /test7134/_search?size=0
+{
+  ""aggs"": {
+    ""foo_cardinality"": {
+      ""cardinality"": {
+        ""field"": ""foo""
+      }
+    }
+  }
+}
+
+# took : 4000 ms (average over multiple tests - clearing cache the performance is always slower
+POST /test7140-reindexed/_search?size=0
+{
+  ""aggs"": {
+    ""foo_cardinality"": {
+      ""cardinality"": {
+        ""field"": ""foo""
+      }
+    }
+  }
+}
+
+#this can be used to test multiple times (file system cache was not found to be a culprit after rebooting the one-node cluster)
+POST test*/_cache/clear 
+```
+
+This is enough to reproduce but as side note force merge to 1 segment file index `test7134` will cause the segment files in `GET _cat/segments/test7134` in LUCENE 8.8.2 to be replaced by one segment file in LUCENE 8.9.0 at which point response time is increased 250%",jguay,closed,"['>enhancement', ':Analytics/Aggregations', 'Team:Analytics']",https://github.com/elastic/elasticsearch/issues/84721,2022-03-07T17:44:52Z,4,https://api.github.com/repos/elastic/elasticsearch,https://github.com/elastic/elasticsearch/issues/84721,"{
+  ""application_resource"": ""yes""
+}"
